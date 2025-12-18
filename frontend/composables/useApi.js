@@ -95,6 +95,18 @@ export const useApi = () => {
     return await request(url, { method: 'POST' })
   }
 
+  const downloadChatEmoji = async (data = {}) => {
+    return await request('/chat/media/emoji/download', {
+      method: 'POST',
+      body: {
+        account: data.account || null,
+        md5: data.md5 || '',
+        emoji_url: data.emoji_url || '',
+        force: !!data.force
+      }
+    })
+  }
+
   // 获取图片解密密钥
   const getMediaKeys = async (params = {}) => {
     const query = new URLSearchParams()
@@ -135,6 +147,7 @@ export const useApi = () => {
     listChatSessions,
     listChatMessages,
     openChatMediaFolder,
+    downloadChatEmoji,
     getMediaKeys,
     saveMediaKeys,
     decryptAllMedia
