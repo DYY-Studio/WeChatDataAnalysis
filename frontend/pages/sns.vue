@@ -1,136 +1,103 @@
 <template>
   <div class="h-screen flex overflow-hidden" style="background-color: #EDEDED">
-    <!-- 左侧边栏 -->
-    <div class="border-r border-gray-200 flex flex-col" style="background-color: #e8e7e7; width: 60px; min-width: 60px; max-width: 60px">
-      <div class="flex-1 flex flex-col justify-start pt-0 gap-0">
-        <!-- 头像（类似微信侧边栏） -->
-        <div class="w-full h-[60px] flex items-center justify-center">
-          <div class="w-[40px] h-[40px] rounded-md overflow-hidden bg-gray-300 flex-shrink-0">
-            <img v-if="selfAvatarUrl" :src="selfAvatarUrl" alt="avatar" class="w-full h-full object-cover" />
+    <!-- 左侧朋友圈联系人 -->
+    <div class="w-[280px] flex flex-col min-h-0 border-r border-gray-200 bg-[#EDEDED]">
+      <div class="p-3">
+        <div class="flex items-center justify-between">
+          <div class="text-sm font-semibold text-gray-700">朋友圈联系人</div>
+          <div class="text-xs text-gray-500">{{ snsUsers.length }}</div>
+        </div>
+        <input
+            v-model="snsUserQuery"
+            type="text"
+            placeholder="搜索"
+            class="mt-2 w-full px-3 py-2 rounded-md border border-gray-200 bg-white text-sm outline-none focus:ring-2 focus:ring-[#576b95]/30 focus:border-[#576b95]"
+        />
+
+        <div class="mt-2 flex gap-2">
+          <button
+              type="button"
+              class="flex-1 px-3 py-2 rounded-md text-sm border border-gray-200 bg-white hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="onExportAllClick"
+              :disabled="!selectedAccount || exportJob?.status === 'running'"
+              title="导出全部朋友圈（HTML 离线 ZIP）"
+          >
+            导出全部
+          </button>
+          <button
+              type="button"
+              class="flex-1 px-3 py-2 rounded-md text-sm border border-gray-200 bg-white hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="onExportCurrentClick"
+              :disabled="!selectedAccount || !selectedSnsUser || exportJob?.status === 'running'"
+              title="导出当前选中联系人（HTML 离线 ZIP）"
+          >
+            导出此人
+          </button>
+        </div>
+        <div v-if="exportError" class="mt-2 text-xs text-red-600 whitespace-pre-wrap">{{ exportError }}</div>
+        <div v-else-if="exportJob" class="mt-2 text-xs text-gray-500">
+          <span>导出状态：{{ exportJob.status }}</span>
+          <button
+              v-if="exportJob.status === 'done' && exportJob.exportId"
+              type="button"
+              class="ml-2 text-xs text-[#576b95] hover:underline bg-transparent border-0 p-0"
+              @click="downloadSnsExport(exportJob.exportId)"
+          >
+            下载 ZIP
+          </button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-auto min-h-0 bg-white">
+        <div
+            class="px-3 py-2 text-sm cursor-pointer flex items-center gap-2 border-b border-gray-100 hover:bg-gray-50"
+            :class="selectedSnsUser ? 'text-gray-700' : 'bg-gray-50 text-gray-900 font-medium'"
+            @click="selectSnsUser('')"
+        >
+          <div class="w-8 h-8 rounded-md bg-gray-200 flex items-center justify-center text-xs text-gray-500 flex-shrink-0">全</div>
+          <div class="flex-1 min-w-0 truncate">全部</div>
+        </div>
+
+        <div
+            v-for="u in filteredSnsUsers"
+            :key="u.username"
+            class="px-3 py-2 text-sm cursor-pointer flex items-center gap-2 border-b border-gray-100 hover:bg-gray-50"
+            :class="selectedSnsUser === u.username ? 'bg-gray-50 text-gray-900 font-medium' : 'text-gray-700'"
+            @click="selectSnsUser(u.username)"
+        >
+          <div class="w-8 h-8 rounded-md overflow-hidden bg-gray-300 flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
+            <img
+                v-if="postAvatarUrl(u.username)"
+                :src="postAvatarUrl(u.username)"
+                :alt="u.displayName || u.username"
+                class="w-full h-full object-cover"
+                referrerpolicy="no-referrer"
+            />
             <div
-              v-else
-              class="w-full h-full flex items-center justify-center text-white text-xs font-bold"
-              style="background-color: #4B5563"
+                v-else
+                class="w-full h-full flex items-center justify-center text-white text-xs font-bold"
+                style="background-color: #4B5563"
             >
-              我
+              {{ (u.displayName || u.username || '友').charAt(0) }}
             </div>
           </div>
-        </div>
 
-        <!-- 聊天图标 -->
-        <div
-          class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          title="聊天"
-          @click="goChat"
-        >
-          <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
-          >
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isChatRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path
-                  d="M12 19.8C17.52 19.8 22 15.99 22 11.3C22 6.6 17.52 2.8 12 2.8C6.48 2.8 2 6.6 2 11.3C2 13.29 2.8 15.12 4.15 16.57C4.6 17.05 4.82 17.29 4.92 17.44C5.14 17.79 5.21 17.99 5.23 18.4C5.24 18.59 5.22 18.81 5.16 19.26C5.1 19.75 5.07 19.99 5.13 20.16C5.23 20.49 5.53 20.71 5.87 20.72C6.04 20.72 6.27 20.63 6.72 20.43L8.07 19.86C8.43 19.71 8.61 19.63 8.77 19.59C8.95 19.55 9.04 19.54 9.22 19.54C9.39 19.53 9.64 19.57 10.14 19.65C10.74 19.75 11.37 19.8 12 19.8Z"
-                />
-              </svg>
+          <div class="flex-1 min-w-0">
+            <div class="truncate" :class="{ 'privacy-blur': privacyMode }">{{ u.displayName || u.username }}</div>
+            <div class="text-[11px] text-gray-400 truncate">
+              <span>{{ u.username }}</span>
+              <span> · </span>
+              <!-- `postCount` is computed from the decrypted sqlite snapshot (cache). The timeline API may only return
+                   the visible subset (e.g. privacy setting: "only last 3 days"), so show loaded/cache for the selected user. -->
+              <template v-if="selectedSnsUser === u.username">
+                <span>{{ posts.length }}</span>
+                <span v-if="u.postCount != null">/{{ u.postCount || 0 }}</span>
+                <span> 条</span>
+              </template>
+              <template v-else>
+                <span>{{ u.postCount || 0 }} 条</span>
+              </template>
             </div>
-          </div>
-        </div>
-
-        <!-- 朋友圈图标（Aperture 风格） -->
-        <div
-          class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          title="朋友圈"
-          @click="goSns"
-        >
-          <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
-          >
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isSnsRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg
-                class="w-full h-full"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <line x1="14.31" y1="8" x2="20.05" y2="17.94" />
-                <line x1="9.69" y1="8" x2="21.17" y2="8" />
-                <line x1="7.38" y1="12" x2="13.12" y2="2.06" />
-                <line x1="9.69" y1="16" x2="3.95" y2="6.06" />
-                <line x1="14.31" y1="16" x2="2.83" y2="16" />
-                <line x1="16.62" y1="12" x2="10.88" y2="21.94" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <!-- 联系人图标 -->
-        <div
-          class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          title="联系人"
-          @click="goContacts"
-        >
-          <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
-          >
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isContactsRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" />
-                <circle cx="10" cy="7" r="4" />
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <!-- 年度总结图标 -->
-        <div
-          class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          title="年度总结"
-          @click="goWrapped"
-        >
-          <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
-          >
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isWrappedRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg
-                class="w-full h-full"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <rect x="4" y="4" width="16" height="16" rx="2" />
-                <path d="M8 16v-5" />
-                <path d="M12 16v-8" />
-                <path d="M16 16v-3" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <!-- 隐私模式按钮 -->
-        <div
-          class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          @click="privacyMode = !privacyMode"
-          :title="privacyMode ? '关闭隐私模式' : '开启隐私模式'"
-        >
-          <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
-          >
-            <svg class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="privacyMode ? 'text-[#07b75b]' : 'text-[#5d5d5d]'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path v-if="privacyMode" stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-              <path v-else stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-              <circle v-if="!privacyMode" cx="12" cy="12" r="3" />
-            </svg>
           </div>
         </div>
       </div>
@@ -138,28 +105,100 @@
 
     <!-- 右侧朋友圈区域 -->
     <div class="flex-1 flex flex-col min-h-0" style="background-color: #EDEDED">
-      <!-- 桌面端标题栏放在内容区（与聊天页一致） -->
-      <DesktopTitleBar />
-
-	      <div class="flex-1 overflow-auto min-h-0">
+      <div ref="timelineScrollEl" class="flex-1 overflow-auto min-h-0 bg-white" @scroll="onScroll">
 	        <div class="max-w-2xl mx-auto px-4 py-4">
-	          <div v-if="error" class="text-sm text-red-500 whitespace-pre-wrap py-2">{{ error }}</div>
-	          <div v-else-if="isLoading && posts.length === 0" class="text-sm text-gray-500 py-2">加载中…</div>
-	          <div v-else-if="posts.length === 0" class="text-sm text-gray-500 py-2">暂无朋友圈数据</div>
+            <div class="relative w-full mb-12 -mt-4 bg-white">
+              <div class="h-64 w-full bg-[#333333] relative overflow-hidden group">
+                <img
+                    v-if="activeCover && activeCover.media && activeCover.media.length > 0"
+                    :src="getSnsMediaUrl(activeCover, activeCover.media[0], 0, activeCover.media[0].url)"
+                    class="w-full h-full object-cover"
+                    alt="朋友圈封面"
+                    @load="onCoverMediaLoaded(activeCover, $event)"
+                />
+                <div
+                    v-if="snsMediaStageLabel(snsCoverStageKey(activeCover)) || snsMediaStageLoading[snsCoverStageKey(activeCover)]"
+                    class="absolute top-3 left-3 z-20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                >
+                  <div
+                      class="text-[10px] px-2 py-0.5 rounded backdrop-blur-sm shadow-sm"
+                      :class="snsMediaStageBadgeColorClass(snsCoverStageKey(activeCover))"
+                      :title="snsMediaStageBadgeTitle(snsCoverStageKey(activeCover))"
+                  >
+                    {{ snsMediaStageLabel(snsCoverStageKey(activeCover)) || '识别中' }}
+                  </div>
+                </div>
 
-	          <!-- 图片匹配提示（实验功能） -->
-	          <div v-if="!error" class="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-	            <div class="font-medium">图片匹配（实验功能）</div>
-	            <div class="mt-1 leading-5">
-	              图片可能会出现错配或无法显示。点击图片进入预览，可在“候选匹配”中手动选择；你的选择会保存在本机并在下次优先使用。
-	            </div>
-	            <label class="mt-2 flex items-start gap-2 select-none">
-	              <input v-model="snsAvoidOtherPicked" type="checkbox" class="mt-[2px]" />
-	              <span class="leading-5">
-	                自动匹配时，避开已被你手动指定到其他动态的图片（降低重复）
-	              </span>
-	            </label>
-	          </div>
+                <div
+                    v-if="(activeCover && Number(activeCover.createTime || 0)) || (covers && covers.length > 1)"
+                    class="absolute top-3 right-3 z-10 text-[11px] text-white bg-black/40 backdrop-blur-sm px-2 py-1 rounded pointer-events-none"
+                >
+                  <span v-if="activeCover && Number(activeCover.createTime || 0)">{{ formatCoverTime(activeCover.createTime) }}</span>
+                  <span v-if="covers && covers.length > 1">
+                    <span v-if="activeCover && Number(activeCover.createTime || 0)">&nbsp;·&nbsp;</span>{{ coverIndex + 1 }}/{{ covers.length }}
+                  </span>
+                </div>
+
+                <button
+                    v-if="covers && covers.length > 1"
+                    type="button"
+                    class="absolute left-2 top-1/2 -translate-y-1/2 z-10 text-white/90 hover:text-white p-2 rounded-full bg-black/25 hover:bg-black/40 transition-colors"
+                    title="上一张封面"
+                    @click.stop="prevCover"
+                >
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+
+                <button
+                    v-if="covers && covers.length > 1"
+                    type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 z-10 text-white/90 hover:text-white p-2 rounded-full bg-black/25 hover:bg-black/40 transition-colors"
+                    title="下一张封面"
+                    @click.stop="nextCover"
+                >
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+              <div class="absolute right-4 -bottom-6 flex items-end gap-4">
+                <div class="text-white font-bold text-xl mb-7 drop-shadow-md">
+                  {{ selfInfo.nickname || '获取中...' }}
+                </div>
+
+                <div class="w-[72px] h-[72px] rounded-lg bg-white p-[2px] shadow-sm">
+                  <img
+                      v-if="selfInfo.wxid"
+                      :src="postAvatarUrl(selfInfo.wxid)"
+                      class="w-full h-full rounded-md object-cover bg-gray-100"
+                      :alt="selfInfo.nickname"
+                      referrerpolicy="no-referrer"
+                  />
+                  <div v-else class="w-full h-full rounded-md bg-gray-300 flex items-center justify-center text-gray-500 text-xs">
+                    ...
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-if="error" class="text-sm text-red-500 whitespace-pre-wrap py-4 text-center">{{ error }}</div>
+
+            <div v-else-if="isLoading && posts.length === 0" class="flex flex-col items-center justify-center py-16">
+              <div class="w-8 h-8 border-[3px] border-gray-200 border-t-[#576b95] rounded-full animate-spin"></div>
+              <div class="mt-4 text-sm text-gray-400">正在前往朋友圈...</div>
+            </div>
+
+            <div v-else-if="posts.length === 0" class="text-sm text-gray-400 py-16 text-center">暂无朋友圈数据</div>
+
+            <div v-if="!error && posts.length > 0" class="text-[11px] text-gray-500 mb-2 flex flex-wrap gap-x-3 gap-y-1">
+              <span v-if="selectedSnsUserInfo">缓存统计：{{ selectedSnsUserInfo.postCount || 0 }}</span>
+              <span v-if="!hasMore && !isLoading">（已到末尾）</span>
+            </div>
+            <div v-if="showSnsCountMismatchHint" class="text-[11px] text-amber-700 mb-3">
+              提示：左侧“缓存统计”来自解密后的 sns.db；当前 timeline 接口只返回可见部分，所以会出现
+              <span class="font-medium">{{ posts.length }}/{{ selectedSnsUserInfo?.postCount || 0 }}</span>。
+            </div>
 
 	          <div v-for="post in posts" :key="post.id" class="bg-white rounded-sm px-4 py-4 mb-3">
 	            <div class="flex items-start gap-3" @contextmenu.prevent="openPostContextMenu($event, post)">
@@ -186,43 +225,209 @@
                 </div>
 
                 <div
-                  v-if="post.contentDesc"
-                  class="mt-1 text-sm text-gray-900 leading-6 whitespace-pre-wrap break-words"
-                  :class="{ 'privacy-blur': privacyMode }"
+                    v-if="post.contentDesc"
+                    class="mt-1 text-sm text-gray-900 leading-6 whitespace-pre-wrap break-words"
+                    :class="{ 'privacy-blur': privacyMode }"
                 >
-                  {{ post.contentDesc }}
+                  <span v-for="(seg, idx) in parseTextWithEmoji(String(post.contentDesc || ''))" :key="idx">
+                    <span v-if="seg.type === 'text'">{{ seg.content }}</span>
+                    <img v-else :src="seg.emojiSrc" :alt="seg.content" class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px" />
+                  </span>
                 </div>
 
-                <div v-if="post.media && post.media.length > 0" class="mt-2" :class="{ 'privacy-blur': privacyMode }">
-                  <div v-if="post.media.length === 1" class="max-w-[360px]">
-                    <div
-                      v-if="!hasMediaError(post.id, 0) && getMediaThumbSrc(post, post.media[0], 0)"
-                      class="inline-block cursor-pointer relative"
-                      @click.stop="onMediaClick(post, post.media[0], 0)"
-                    >
+                <div v-if="post.type === 3" class="mt-2 w-full" :class="{ 'privacy-blur': privacyMode }">
+                  <a :href="post.contentUrl" target="_blank" class="block w-full bg-[#F7F7F7] p-2 rounded-sm no-underline hover:bg-[#EFEFEF] transition-colors">
+                    <div class="flex items-center gap-3">
                       <img
-                        :src="getMediaThumbSrc(post, post.media[0], 0)"
-                        class="rounded-sm max-h-[360px] object-cover"
+                          v-if="getArticleCardThumbSrc(post)"
+                          :src="getArticleCardThumbSrc(post)"
+                          class="w-12 h-12 object-cover flex-shrink-0 bg-white"
+                          alt=""
+                          loading="lazy"
+                          referrerpolicy="no-referrer"
+                          @error="onArticleThumbError(post)"
+                      />
+                      <div v-else class="w-12 h-12 flex items-center justify-center bg-gray-200 text-gray-400 flex-shrink-0 text-xs">
+                        文章
+                      </div>
+
+                      <div class="flex-1 min-w-0 flex items-center overflow-hidden h-12">
+                        <div class="text-[13px] text-gray-900 leading-tight line-clamp-2">{{ post.title }}</div>
+                      </div>
+                    </div>
+                  </a>
+                </div>
+
+                <div v-else-if="post.type === 28 && post.finderFeed && Object.keys(post.finderFeed).length > 0" class="mt-2 w-full max-w-[304px]" :class="{ 'privacy-blur': privacyMode }">
+                  <!-- 浏览器没有看微信视频号的环境，暂时不进行跳转 -->
+                  <div class="relative w-full overflow-hidden rounded-sm bg-[#F7F7F7]">
+                    <img
+                        v-if="getFinderFeedThumbSrc(post)"
+                        :src="getFinderFeedThumbSrc(post)"
+                        class="block w-full aspect-square object-cover"
                         alt=""
                         loading="lazy"
                         referrerpolicy="no-referrer"
-                        @error="onMediaError(post.id, 0)"
+                    />
+                    <div v-else class="w-full aspect-square flex items-center justify-center bg-gray-200">
+                      <span class="line-clamp-3 px-4 text-center text-[13px] leading-5 text-gray-500">{{ formatFinderFeedCardText(post) }}</span>
+                    </div>
+                    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div class="w-12 h-12 rounded-full bg-black/45 flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="isExternalShareMoment(post)" class="mt-2 w-full" :class="{ 'privacy-blur': privacyMode }">
+                  <a
+                      v-if="getMomentLinkCardUrl(post)"
+                      :href="getMomentLinkCardUrl(post)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="block w-full bg-[#F7F7F7] p-2 rounded-sm no-underline hover:bg-[#EFEFEF] transition-colors"
+                  >
+                    <div class="flex items-center gap-3">
+                      <img
+                          v-if="getExternalShareCardThumbSrc(post)"
+                          :src="getExternalShareCardThumbSrc(post)"
+                          class="w-12 h-12 object-cover flex-shrink-0 bg-white"
+                          alt=""
+                          loading="lazy"
+                          referrerpolicy="no-referrer"
+                          @error="onExternalShareCardThumbError(post)"
                       />
+                      <div v-else class="w-12 h-12 flex items-center justify-center bg-gray-200 text-gray-400 flex-shrink-0 text-xs">
+                        {{ formatExternalSharePlaceholder(post) }}
+                      </div>
+
+                      <div class="flex-1 min-w-0 flex items-center overflow-hidden h-12">
+                        <div class="text-[13px] text-gray-900 leading-tight line-clamp-2">{{ formatExternalShareCardTitle(post) }}</div>
+                      </div>
+                    </div>
+                  </a>
+                  <div v-else class="block w-full bg-[#F7F7F7] p-2 rounded-sm">
+                    <div class="flex items-center gap-3">
+                      <img
+                          v-if="getExternalShareCardThumbSrc(post)"
+                          :src="getExternalShareCardThumbSrc(post)"
+                          class="w-12 h-12 object-cover flex-shrink-0 bg-white"
+                          alt=""
+                          loading="lazy"
+                          referrerpolicy="no-referrer"
+                          @error="onExternalShareCardThumbError(post)"
+                      />
+                      <div v-else class="w-12 h-12 flex items-center justify-center bg-gray-200 text-gray-400 flex-shrink-0 text-xs">
+                        {{ formatExternalSharePlaceholder(post) }}
+                      </div>
+
+                      <div class="flex-1 min-w-0 flex items-center overflow-hidden h-12">
+                        <div class="text-[13px] text-gray-900 leading-tight line-clamp-2">{{ formatExternalShareCardTitle(post) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="post.media && post.media.length > 0" class="mt-2" :class="{ 'privacy-blur': privacyMode }">
+                  <div v-if="post.media.length === 1" class="max-w-[360px]">
+                    <div
+                        v-if="!hasMediaError(post.id, 0) && getMediaThumbSrc(post, post.media[0], 0)"
+                        class="inline-block cursor-pointer relative group"
+                        @click.stop="onMediaClick(post, post.media[0], 0)"
+                        @mouseenter="onLivePhotoEnter(post.id, 0, post.media[0])"
+                        @mouseleave="onLivePhotoLeave(post.id, 0, post.media[0])"
+                    >
+                      <video
+                          v-if="Number(post.media[0]?.type || 0) === 6"
+                          :src="getSnsRemoteVideoSrc(post, post.media[0])"
+                          :poster="getMediaThumbSrc(post, post.media[0], 0)"
+                          class="rounded-sm max-h-[360px] max-w-full object-cover"
+                          autoplay
+                          loop
+                          muted
+                          playsinline
+                          @loadeddata="onLocalVideoLoaded(post.id, post.media[0].id); onSnsMediaLoaded(post, post.media[0], 0)"
+                          @error="onLocalVideoError(post.id, post.media[0].id)"
+                      ></video>
+
+                      <video
+                          v-else-if="isLivePhotoMedia(post.media[0]) && isLivePhotoActive(post.id, 0) && !hasLivePhotoVideoError(post.id, 0)"
+                          ref="livePhotoHoverVideoEl"
+                          :src="getLivePhotoVideoSrc(post, post.media[0], 0)"
+                          :poster="getMediaThumbSrc(post, post.media[0], 0)"
+                          class="rounded-sm max-h-[360px] max-w-full object-cover pointer-events-none"
+                          autoplay
+                          loop
+                          :muted="livePhotoHoverMuted"
+                          playsinline
+                          @loadeddata="onSnsMediaLoaded(post, post.media[0], 0)"
+                          @error="onLivePhotoVideoError(post.id, 0)"
+                      ></video>
+
+                      <img
+                          v-else
+                          :src="getMediaThumbSrc(post, post.media[0], 0)"
+                          class="rounded-sm max-h-[360px] object-cover"
+                          alt=""
+                          loading="lazy"
+                          referrerpolicy="no-referrer"
+                          @load="onSnsMediaLoaded(post, post.media[0], 0, $event)"
+                          @error="onMediaError(post.id, 0)"
+                      />
+
                       <div
-                        v-if="Number(post.media[0]?.type || 0) === 6"
-                        class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                          v-if="snsMediaStageLabel(snsMediaStageKey(post.id, 0, 'thumb')) || snsMediaStageLoading[snsMediaStageKey(post.id, 0, 'thumb')]"
+                          class="absolute top-2 left-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                      >
+                        <div
+                            class="text-[10px] px-2 py-0.5 rounded backdrop-blur-sm shadow-sm"
+                            :class="snsMediaStageBadgeColorClass(snsMediaStageKey(post.id, 0, 'thumb'))"
+                            :title="snsMediaStageBadgeTitle(snsMediaStageKey(post.id, 0, 'thumb'))"
+                        >
+                          {{ snsMediaStageLabel(snsMediaStageKey(post.id, 0, 'thumb')) || '识别中' }}
+                        </div>
+                      </div>
+                      <div
+                          v-if="Number(post.media[0]?.type || 0) === 6 && !isLocalVideoLoaded(post.id, post.media[0].id)"
+                          class="absolute inset-0 flex items-center justify-center pointer-events-none"
                       >
                         <div class="w-12 h-12 rounded-full bg-black/45 flex items-center justify-center">
                           <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                         </div>
                       </div>
+
+                      <div
+                          v-if="isLivePhotoMedia(post.media[0])"
+                          class="absolute top-2 right-2 bg-black/30 backdrop-blur-sm text-white p-1 rounded-full pointer-events-none z-10 shadow-sm"
+                      >
+                        <LivePhotoIcon :size="16" class="block" />
+                      </div>
+
+                      <button
+                        v-if="isLivePhotoMedia(post.media[0]) && isLivePhotoActive(post.id, 0) && !hasLivePhotoVideoError(post.id, 0)"
+                        type="button"
+                        class="absolute top-2 right-10 text-white/90 hover:text-white p-1 rounded-full bg-black/30 hover:bg-black/50 transition-colors z-10"
+                        :title="livePhotoHoverMuted ? '开启声音' : '静音'"
+                        @click.stop="toggleLivePhotoHoverMuted"
+                      >
+                        <svg v-if="livePhotoHoverMuted" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M23 9l-6 6M17 9l6 6" />
+                        </svg>
+                        <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.5 8.5a4 4 0 010 7" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.5 5.5a8 8 0 010 13" />
+                        </svg>
+                      </button>
                     </div>
                     <div
-                      v-else
-                      class="w-[240px] h-[180px] rounded-sm bg-gray-100 border border-gray-200 flex items-center justify-center text-xs text-gray-400"
-                      title="图片加载失败"
-                      @click.stop="onMediaClick(post, post.media[0], 0)"
-                      style="cursor: pointer;"
+                        v-else
+                        class="w-[240px] h-[180px] rounded-sm bg-gray-100 border border-gray-200 flex items-center justify-center text-xs text-gray-400"
+                        title="图片加载失败"
+                        @click.stop="onMediaClick(post, post.media[0], 0)"
+                        style="cursor: pointer;"
                     >
                       图片加载失败
                     </div>
@@ -230,28 +435,97 @@
 
                   <div v-else class="grid grid-cols-3 gap-1 max-w-[360px]">
                     <div
-                      v-for="(m, idx) in post.media.slice(0, 9)"
-                      :key="idx"
-                      class="w-[116px] h-[116px] rounded-[2px] overflow-hidden bg-gray-100 border border-gray-200 flex items-center justify-center cursor-pointer relative"
-                      @click.stop="onMediaClick(post, m, idx)"
+                        v-for="(m, idx) in post.media.slice(0, 9)"
+                        :key="idx"
+                        class="w-[116px] h-[116px] rounded-[2px] overflow-hidden bg-gray-100 border border-gray-200 flex items-center justify-center cursor-pointer relative group"
+                        @click.stop="onMediaClick(post, m, idx)"
+                        @mouseenter="onLivePhotoEnter(post.id, idx, m)"
+                        @mouseleave="onLivePhotoLeave(post.id, idx, m)"
                     >
+                      <video
+                          v-if="!hasMediaError(post.id, idx) && Number(m?.type || 0) === 6"
+                          :src="getSnsRemoteVideoSrc(post, m)"
+                          :poster="getMediaThumbSrc(post, m, idx)"
+                          class="w-full h-full object-cover"
+                          autoplay
+                          loop
+                          muted
+                          playsinline
+                          @loadeddata="onLocalVideoLoaded(post.id, m.id); onSnsMediaLoaded(post, m, idx)"
+                          @error="onLocalVideoError(post.id, m.id)"
+                      ></video>
+                      <video
+                          v-else-if="isLivePhotoMedia(m) && isLivePhotoActive(post.id, idx) && !hasLivePhotoVideoError(post.id, idx)"
+                          ref="livePhotoHoverVideoEl"
+                          :src="getLivePhotoVideoSrc(post, m, idx)"
+                          :poster="getMediaThumbSrc(post, m, idx)"
+                          class="w-full h-full object-cover pointer-events-none"
+                          autoplay
+                          loop
+                          :muted="livePhotoHoverMuted"
+                          playsinline
+                          @loadeddata="onSnsMediaLoaded(post, m, idx)"
+                          @error="onLivePhotoVideoError(post.id, idx)"
+                      ></video>
                       <img
-                        v-if="!hasMediaError(post.id, idx) && getMediaThumbSrc(post, m, idx)"
-                        :src="getMediaThumbSrc(post, m, idx)"
-                        class="w-full h-full object-cover"
-                        alt=""
-                        loading="lazy"
-                        referrerpolicy="no-referrer"
-                        @error="onMediaError(post.id, idx)"
+                          v-else-if="!hasMediaError(post.id, idx) && getMediaThumbSrc(post, m, idx)"
+                          :src="getMediaThumbSrc(post, m, idx)"
+                          class="w-full h-full object-cover"
+                          alt=""
+                          loading="lazy"
+                          referrerpolicy="no-referrer"
+                          @load="onSnsMediaLoaded(post, m, idx, $event)"
+                          @error="onMediaError(post.id, idx)"
                       />
+
+                      <div
+                          v-if="snsMediaStageLabel(snsMediaStageKey(post.id, idx, 'thumb')) || snsMediaStageLoading[snsMediaStageKey(post.id, idx, 'thumb')]"
+                          class="absolute top-1 left-1 z-20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                      >
+                        <div
+                            class="text-[10px] px-1.5 py-0.5 rounded backdrop-blur-sm shadow-sm"
+                            :class="snsMediaStageBadgeColorClass(snsMediaStageKey(post.id, idx, 'thumb'))"
+                            :title="snsMediaStageBadgeTitle(snsMediaStageKey(post.id, idx, 'thumb'))"
+                        >
+                          {{ snsMediaStageLabel(snsMediaStageKey(post.id, idx, 'thumb')) || '识别中' }}
+                        </div>
+                      </div>
+                      <!-- 不知道微信朋友圈可不可以发多视频，先这样写吧-->
                       <span v-else class="text-[10px] text-gray-400">图片失败</span>
 
-                      <!-- 视频缩略图的播放提示 -->
-                      <div v-if="Number(m?.type || 0) === 6" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div
+                          v-if="Number(m?.type || 0) === 6 && !isLocalVideoLoaded(post.id, m.id)"
+                          class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                      >
                         <div class="w-10 h-10 rounded-full bg-black/45 flex items-center justify-center">
                           <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                         </div>
                       </div>
+
+                      <div
+                          v-if="isLivePhotoMedia(m)"
+                          class="absolute top-1 right-1 bg-black/30 backdrop-blur-sm text-white p-0.5 rounded-full pointer-events-none z-10 shadow-sm"
+                      >
+                        <LivePhotoIcon :size="14" class="block" />
+                      </div>
+
+                      <button
+                        v-if="isLivePhotoMedia(m) && isLivePhotoActive(post.id, idx) && !hasLivePhotoVideoError(post.id, idx)"
+                        type="button"
+                        class="absolute top-1 right-7 text-white/90 hover:text-white p-0.5 rounded-full bg-black/30 hover:bg-black/50 transition-colors z-10"
+                        :title="livePhotoHoverMuted ? '开启声音' : '静音'"
+                        @click.stop="toggleLivePhotoHoverMuted"
+                      >
+                        <svg v-if="livePhotoHoverMuted" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M23 9l-6 6M17 9l6 6" />
+                        </svg>
+                        <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.5 8.5a4 4 0 010 7" />
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.5 5.5a8 8 0 010 13" />
+                        </svg>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -261,7 +535,23 @@
                 </div>
 
                 <div class="mt-2 flex items-center justify-between">
-                  <span class="text-xs text-gray-400" :class="{ 'privacy-blur': privacyMode }">{{ formatRelativeTime(post.createTime) }}</span>
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="text-xs text-gray-400" :class="{ 'privacy-blur': privacyMode }">{{ formatRelativeTime(post.createTime) }}</span>
+                    <button
+                      v-if="Number(post?.type || 0) === 3 && formatMomentTypeLabel(post)"
+                      type="button"
+                      class="text-xs text-[#576b95] truncate bg-transparent p-0 border-0 hover:underline"
+                      :class="{ 'privacy-blur': privacyMode }"
+                      :title="formatMomentTypeLabel(post)"
+                      @click.stop="onMomentTypeLabelClick(post)"
+                    >{{ formatMomentTypeLabel(post) }}</button>
+                    <span
+                      v-else-if="formatMomentTypeLabel(post)"
+                      class="text-xs text-[#576b95] truncate"
+                      :class="{ 'privacy-blur': privacyMode }"
+                      :title="formatMomentTypeLabel(post)"
+                    >{{ formatMomentTypeLabel(post) }}</span>
+                  </div>
                 </div>
 
 	                <!-- 点赞/评论（参考 WeFlow 展示） -->
@@ -302,7 +592,12 @@
 	                          {{ cleanLikeName(c?.refNickname || c?.refUsername || c?.refUserName || '') }}
 	                        </span>
 	                      </template>
-	                      <span class="text-gray-900" :class="{ 'privacy-blur': privacyMode }">: {{ String(c?.content || '').trim() }}</span>
+	                      <span class="text-gray-900" :class="{ 'privacy-blur': privacyMode }">:
+                          <span v-for="(seg, sidx) in parseTextWithEmoji(String(c?.content || '').trim())" :key="sidx">
+                            <span v-if="seg.type === 'text'">{{ seg.content }}</span>
+                            <img v-else :src="seg.emojiSrc" :alt="seg.content" class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px" />
+                          </span>
+                        </span>
 	                    </div>
 	                  </div>
 	                </div>
@@ -310,16 +605,12 @@
             </div>
           </div>
 
-          <div v-if="hasMore" class="py-2">
-            <button
-              type="button"
-              class="w-full text-sm text-gray-600 py-2 rounded bg-white hover:bg-gray-50 border border-gray-200"
-              :disabled="isLoading"
-              @click="loadPosts({ reset: false })"
-            >
-              {{ isLoading ? '加载中…' : '加载更多' }}
-            </button>
-          </div>
+            <div v-if="isLoading && posts.length > 0" class="py-4 flex justify-center items-center">
+              <div class="w-5 h-5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+            <div v-if="!hasMore && posts.length > 0" class="py-6 text-center text-xs text-gray-400">
+              —— 到底了 ——
+            </div>
         </div>
       </div>
     </div>
@@ -346,71 +637,38 @@
 	      @click="closeImagePreview"
 	    >
 	      <div class="relative max-w-[92vw] max-h-[92vh] flex flex-col items-center" @click.stop>
-	        <img :src="previewSrc" alt="预览" class="max-w-[90vw] max-h-[70vh] object-contain" />
+	        <video
+	          v-if="previewLivePhotoVideoSrc && !previewHasLivePhotoVideoError"
+	          ref="previewLiveVideoEl"
+	          :src="previewLivePhotoVideoSrc"
+	          :poster="previewSrc"
+	          class="max-w-[90vw] max-h-[70vh] object-contain"
+	          autoplay
+	          loop
+	          :muted="previewLivePhotoMuted"
+	          playsinline
+	          @error="onPreviewLivePhotoVideoError"
+	        ></video>
+	        <img v-else :src="previewSrc" alt="预览" class="max-w-[90vw] max-h-[70vh] object-contain" />
 
-	        <!-- 候选匹配面板（仅在本地缓存匹配时有意义） -->
-	        <div class="mt-3 w-full max-w-[90vw] rounded bg-black/35 text-white text-xs px-3 py-2">
-	          <div class="flex items-center justify-between gap-2">
-	            <div class="truncate">
-	              候选匹配：
-	              <span v-if="previewCandidates.loading">加载中…</span>
-	              <span v-else-if="previewCandidates.count > 0">共 {{ previewCandidates.count }} 个</span>
-	              <span v-else>未找到本地候选（可能仅能显示占位图）</span>
-	              <span v-if="previewEffectiveIdx != null" class="ml-2 text-white/80">当前：#{{ Number(previewEffectiveIdx) + 1 }}</span>
-	              <span v-if="previewHasUserOverride" class="ml-2 text-emerald-200">(已保存)</span>
-	            </div>
-	            <div class="flex items-center gap-2 flex-shrink-0">
-	              <button
-	                type="button"
-	                class="px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
-	                @click="toggleCandidatePanel"
-	              >
-	                {{ previewCandidatesOpen ? '收起' : '展开' }}
-	              </button>
-	              <button
-	                v-if="previewHasUserOverride"
-	                type="button"
-	                class="px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
-	                @click="clearUserOverrideForPreview"
-	              >
-	                恢复自动
-	              </button>
-	            </div>
-	          </div>
-
-	          <div v-if="previewCandidates.error" class="mt-2 text-red-200 whitespace-pre-wrap">
-	            {{ previewCandidates.error }}
-	          </div>
-
-	          <div v-if="previewCandidatesOpen && previewCandidates.count > 0" class="mt-2">
-	            <div class="flex gap-2 overflow-x-auto pb-1">
-	              <button
-	                v-for="cand in previewCandidates.items"
-	                :key="cand.idx"
-	                type="button"
-	                class="flex-shrink-0 w-24"
-	                @click="selectCandidateForPreview(cand.idx)"
-	              >
-	                <div class="w-24 h-24 rounded bg-black/20 overflow-hidden border border-white/10">
-	                  <img :src="getPreviewCandidateSrc(cand.idx)" class="w-full h-full object-cover" alt="" />
-	                </div>
-	                <div class="mt-1 text-[11px] text-white/80">#{{ Number(cand.idx) + 1 }}</div>
-	              </button>
-	            </div>
-
-	            <div v-if="previewCandidates.hasMore" class="mt-2">
-	              <button
-	                type="button"
-	                class="px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
-	                :disabled="previewCandidates.loadingMore"
-	                @click="loadMorePreviewCandidates"
-	              >
-	                {{ previewCandidates.loadingMore ? '加载中…' : '加载更多候选' }}
-	              </button>
-	            </div>
-	          </div>
-	        </div>
 	      </div>
+
+	      <button
+	        v-if="previewLivePhotoVideoSrc && !previewHasLivePhotoVideoError"
+	        class="absolute top-4 right-16 text-white/80 hover:text-white p-2 rounded-full bg-black/30 hover:bg-black/50 transition-colors"
+	        :title="previewLivePhotoMuted ? '开启声音' : '静音'"
+	        @click.stop="togglePreviewLivePhotoMuted"
+	      >
+	        <svg v-if="previewLivePhotoMuted" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+	          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+	          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M23 9l-6 6M17 9l6 6" />
+	        </svg>
+	        <svg v-else class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+	          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5z" />
+	          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.5 8.5a4 4 0 010 7" />
+	          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.5 5.5a8 8 0 010 13" />
+	        </svg>
+	      </button>
 
 	      <button
 	        class="absolute top-4 right-4 text-white/80 hover:text-white p-2 rounded-full bg-black/30 hover:bg-black/50 transition-colors"
@@ -425,151 +683,231 @@
 	</template>
 
 <script setup>
+import { storeToRefs } from 'pinia'
+import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { usePrivacyStore } from '~/stores/privacy'
+import { parseTextWithEmoji } from '~/utils/wechat-emojis'
+import { SNS_SETTING_USE_CACHE_KEY, readLocalBoolSetting } from '~/utils/desktop-settings'
+
 useHead({ title: '朋友圈 - 微信数据分析助手' })
 
-const route = useRoute()
-
-const isChatRoute = computed(() => route.path?.startsWith('/chat'))
-const isSnsRoute = computed(() => route.path?.startsWith('/sns'))
-const isContactsRoute = computed(() => route.path?.startsWith('/contacts'))
-const isWrappedRoute = computed(() => route.path?.startsWith('/wrapped'))
-
-// 隐私模式（聊天/朋友圈共用本地开关）
-const PRIVACY_MODE_KEY = 'ui.privacy_mode'
-const privacyMode = ref(false)
-
-onMounted(() => {
-  if (!process.client) return
+// Nuxt dev mode can load hundreds of module resources, quickly filling the default
+// ResourceTiming buffer (150). If it overflows, `<img>` requests may not produce
+// entries, making Server-Timing based stage detection always fall back to "unknown".
+if (process.client) {
   try {
-    privacyMode.value = localStorage.getItem(PRIVACY_MODE_KEY) === '1'
+    if (typeof performance !== 'undefined' && performance?.setResourceTimingBufferSize) {
+      performance.setResourceTimingBufferSize(5000)
+    }
   } catch {}
-})
-
-watch(
-  () => privacyMode.value,
-  (v) => {
-    if (!process.client) return
-    try {
-      localStorage.setItem(PRIVACY_MODE_KEY, v ? '1' : '0')
-    } catch {}
-  }
-)
+}
 
 const api = useApi()
-const selectedAccount = ref(null)
-const availableAccounts = ref([])
+
+const chatAccounts = useChatAccountsStore()
+const { selectedAccount } = storeToRefs(chatAccounts)
+
+const privacyStore = usePrivacyStore()
+const { privacyMode } = storeToRefs(privacyStore)
 
 const posts = ref([])
+// De-dupe across pages to tolerate slight offset drift when the backend filters/omits some rows.
+const seenPostIds = new Set()
+// NOTE: Backend `/api/sns/timeline` uses SQL OFFSET on the raw timeline rows.
+// The UI filters out some rows (e.g. type=7 cover), so `posts.length` must NOT be used as the next OFFSET.
+const timelineOffset = ref(0)
 const hasMore = ref(true)
+// When timeline API reports `hasMore=false` but cached sidebar count indicates more, keep paging.
+// If we hit an empty page, stop trying to avoid infinite requests.
+const cachePagingExhausted = ref(false)
+const timelineScrollEl = ref(null)
 const isLoading = ref(false)
 const error = ref('')
+const snsUseCache = ref(true)
+
+const coverData = ref(null)
+const covers = ref([])
+const coverIndex = ref(0)
+
+const activeCover = computed(() => {
+  const list = Array.isArray(covers.value) ? covers.value : []
+  if (list.length > 0) {
+    const idx = Math.max(0, Math.min(Number(coverIndex.value) || 0, list.length - 1))
+    return list[idx] || null
+  }
+  return coverData.value
+})
+
+const prevCover = () => {
+  const list = Array.isArray(covers.value) ? covers.value : []
+  if (list.length <= 1) return
+  const cur = Number(coverIndex.value) || 0
+  coverIndex.value = (cur - 1 + list.length) % list.length
+}
+
+const nextCover = () => {
+  const list = Array.isArray(covers.value) ? covers.value : []
+  if (list.length <= 1) return
+  const cur = Number(coverIndex.value) || 0
+  coverIndex.value = (cur + 1) % list.length
+}
+
+const formatCoverTime = (tsSeconds) => {
+  const t = Number(tsSeconds || 0)
+  if (!t) return ''
+  const d = new Date(t * 1000)
+  const pad2 = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+// 左侧朋友圈联系人栏
+const snsUsers = ref([])
+const snsUserQuery = ref('')
+// 空字符串表示“全部”
+const selectedSnsUser = ref('')
+
+const selectedSnsUserInfo = computed(() => {
+  const uname = String(selectedSnsUser.value || '').trim()
+  if (!uname) return null
+  const list = Array.isArray(snsUsers.value) ? snsUsers.value : []
+  return list.find((u) => String(u?.username || '').trim() === uname) || null
+})
+
+const showSnsCountMismatchHint = computed(() => {
+  const uname = String(selectedSnsUser.value || '').trim()
+  if (!uname) return false
+  const cached = Number(selectedSnsUserInfo.value?.postCount || 0) || 0
+  const shown = Array.isArray(posts.value) ? posts.value.length : 0
+  return cached > 0 && shown > 0 && !hasMore.value && !isLoading.value && shown < cached
+})
+
+const filteredSnsUsers = computed(() => {
+  const q = String(snsUserQuery.value || '').trim().toLowerCase()
+  const list = Array.isArray(snsUsers.value) ? snsUsers.value : []
+  if (!q) return list
+  return list.filter((u) => {
+    const uname = String(u?.username || '').toLowerCase()
+    const dn = String(u?.displayName || '').toLowerCase()
+    return uname.includes(q) || dn.includes(q)
+  })
+})
 
 const pageSize = 20
 
 const mediaBase = process.client ? 'http://localhost:8000' : ''
 
-// User overrides for SNS image matching (account-local, stored in localStorage).
-const SNS_MEDIA_OVERRIDE_PREFIX = 'sns_media_override:v1:'
-const SNS_MEDIA_OVERRIDE_REV_PREFIX = 'sns_media_override_rev:v1:'
-const snsMediaOverrides = ref({})
-const snsMediaOverrideRev = ref('0')
+// 朋友圈导出（HTML 离线 ZIP）
+const exportJob = ref(null)
+const exportError = ref('')
+let exportEventSource = null
+let exportPollTimer = null
 
-const snsOverrideStorageKey = (account) => `${SNS_MEDIA_OVERRIDE_PREFIX}${String(account || '').trim()}`
-const snsOverrideRevStorageKey = (account) => `${SNS_MEDIA_OVERRIDE_REV_PREFIX}${String(account || '').trim()}`
-const snsOverrideMediaKey = (postId, idx) => `${String(postId || '')}:${String(Number(idx) || 0)}`
-
-const loadSnsMediaOverrides = () => {
-  if (!process.client) return
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) {
-    snsMediaOverrides.value = {}
-    snsMediaOverrideRev.value = '0'
-    return
+const stopSnsExportPolling = () => {
+  if (exportEventSource) {
+    try {
+      exportEventSource.close()
+    } catch {}
+    exportEventSource = null
   }
-  try {
-    const raw = localStorage.getItem(snsOverrideStorageKey(acc))
-    const parsed = raw ? JSON.parse(raw) : {}
-    snsMediaOverrides.value = parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    snsMediaOverrides.value = {}
-  }
-  try {
-    const rev = localStorage.getItem(snsOverrideRevStorageKey(acc))
-    snsMediaOverrideRev.value = String(rev || '0')
-  } catch {
-    snsMediaOverrideRev.value = '0'
+  if (exportPollTimer) {
+    clearInterval(exportPollTimer)
+    exportPollTimer = null
   }
 }
 
-const saveSnsMediaOverrides = () => {
-  if (!process.client) return
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return
-  try {
-    localStorage.setItem(snsOverrideStorageKey(acc), JSON.stringify(snsMediaOverrides.value || {}))
-  } catch {}
-  try {
-    localStorage.setItem(snsOverrideRevStorageKey(acc), String(snsMediaOverrideRev.value || '0'))
-  } catch {}
-}
-
-// Settings: avoid auto-using an image that was manually pinned to another SNS post.
-const SNS_SNS_SETTINGS_PREFIX = 'sns_settings:v1:'
-const snsAvoidOtherPicked = ref(true)
-const snsAvoidOtherPickedStorageKey = (account) => `${SNS_SNS_SETTINGS_PREFIX}${String(account || '').trim()}:avoid_other_picked`
-
-const loadSnsSettings = () => {
-  if (!process.client) return
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return
-  try {
-    const raw = localStorage.getItem(snsAvoidOtherPickedStorageKey(acc))
-    if (raw == null || raw === '') return
-    snsAvoidOtherPicked.value = raw === '1' || raw === 'true'
-  } catch {}
-}
-
-const saveSnsSettings = () => {
-  if (!process.client) return
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return
-  try {
-    localStorage.setItem(snsAvoidOtherPickedStorageKey(acc), snsAvoidOtherPicked.value ? '1' : '0')
-  } catch {}
-}
-
-const syncSnsMediaPicksToBackend = async () => {
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return
-  try {
-    await api.saveSnsMediaPicks({ account: acc, picks: snsMediaOverrides.value || {} })
-  } catch {}
-}
-
-const getSnsMediaOverridePick = (postId, idx) => {
-  const key = snsOverrideMediaKey(postId, idx)
-  const v = snsMediaOverrides.value?.[key]
-  return String(v || '').trim()
-}
-
-const setSnsMediaOverridePick = (postId, idx, pick) => {
-  if (!process.client) return
-  const key = snsOverrideMediaKey(postId, idx)
-  const v = String(pick || '').trim()
-  if (!v) {
-    if (snsMediaOverrides.value && Object.prototype.hasOwnProperty.call(snsMediaOverrides.value, key)) {
-      delete snsMediaOverrides.value[key]
+const startSnsExportHttpPolling = (exportId) => {
+  if (!exportId) return
+  stopSnsExportPolling()
+  exportPollTimer = setInterval(async () => {
+    try {
+      const resp = await api.getSnsExport(exportId)
+      exportJob.value = resp?.job || exportJob.value
+      const st = String(exportJob.value?.status || '')
+      if (st === 'done' || st === 'error' || st === 'cancelled') stopSnsExportPolling()
+    } catch {
+      // ignore transient errors
     }
-  } else {
-    snsMediaOverrides.value[key] = v
+  }, 1200)
+}
+
+const startSnsExportPolling = (exportId) => {
+  stopSnsExportPolling()
+  if (!exportId) return
+
+  if (process.client && typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+    const base = 'http://localhost:8000'
+    const url = `${base}/api/sns/exports/${encodeURIComponent(String(exportId))}/events`
+    try {
+      exportEventSource = new EventSource(url)
+      exportEventSource.onmessage = (ev) => {
+        try {
+          const next = JSON.parse(String(ev.data || '{}'))
+          exportJob.value = next || exportJob.value
+          const st = String(exportJob.value?.status || '')
+          if (st === 'done' || st === 'error' || st === 'cancelled') stopSnsExportPolling()
+        } catch {}
+      }
+      exportEventSource.onerror = () => {
+        try {
+          exportEventSource?.close()
+        } catch {}
+        exportEventSource = null
+        if (!exportPollTimer) startSnsExportHttpPolling(exportId)
+      }
+      return
+    } catch {
+      exportEventSource = null
+    }
   }
-  saveSnsMediaOverrides()
-  // Keep backend in sync so it can apply duplicate-avoidance logic.
-  // Then bump `pv` so other auto-matched images reload using the updated picks.
-  void syncSnsMediaPicksToBackend().finally(() => {
-    snsMediaOverrideRev.value = String(Date.now())
-    saveSnsMediaOverrides()
-  })
+
+  startSnsExportHttpPolling(exportId)
+}
+
+const downloadSnsExport = (exportId) => {
+  if (!process.client) return
+  const id = String(exportId || '').trim()
+  if (!id) return
+  const base = 'http://localhost:8000'
+  const url = `${base}/api/sns/exports/${encodeURIComponent(id)}/download`
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+const onExportAllClick = async () => {
+  if (!selectedAccount.value) return
+  exportError.value = ''
+  try {
+    const resp = await api.createSnsExport({
+      account: selectedAccount.value,
+      scope: 'all',
+      usernames: [],
+      use_cache: snsUseCache.value ? 1 : 0
+    })
+    exportJob.value = resp?.job || null
+    const exportId = exportJob.value?.exportId
+    if (exportId) startSnsExportPolling(exportId)
+  } catch (e) {
+    exportError.value = e?.message || '创建导出任务失败'
+  }
+}
+
+const onExportCurrentClick = async () => {
+  if (!selectedAccount.value) return
+  const uname = String(selectedSnsUser.value || '').trim()
+  if (!uname) return
+  exportError.value = ''
+  try {
+    const resp = await api.createSnsExport({
+      account: selectedAccount.value,
+      scope: 'selected',
+      usernames: [uname],
+      use_cache: snsUseCache.value ? 1 : 0
+    })
+    exportJob.value = resp?.job || null
+    const exportId = exportJob.value?.exportId
+    if (exportId) startSnsExportPolling(exportId)
+  } catch (e) {
+    exportError.value = e?.message || '创建导出任务失败'
+  }
 }
 
 // Track failed images per-post, per-index to render placeholders instead of broken <img>.
@@ -579,6 +917,433 @@ const mediaErrorKey = (postId, idx) => `${String(postId || '')}:${String(idx || 
 const hasMediaError = (postId, idx) => !!mediaErrors.value[mediaErrorKey(postId, idx)]
 const onMediaError = (postId, idx) => {
   mediaErrors.value[mediaErrorKey(postId, idx)] = true
+}
+
+// Hover badge: show which SNS media pipeline stage produced the image.
+// Backend provides `X-SNS-Source` (and optional `X-SNS-Hit-Type`, `X-SNS-X-Enc`) on `/api/sns/media` responses.
+const snsMediaStage = ref({}) // stageKey -> { source, hitType, xEnc }
+const snsMediaStageLoading = ref({}) // stageKey -> boolean
+const snsMediaStageInFlight = new Set()
+
+const isSnsMediaApiUrl = (url) => {
+  const u = String(url || '').trim()
+  return !!u && u.includes('/api/sns/media')
+}
+
+const snsMediaStageKey = (postId, idx, kind = 'thumb') => {
+  const acc = String(selectedAccount.value || '').trim()
+  const pid = String(postId || '').trim()
+  return `sns:${acc}:${pid}:${String(Number(idx) || 0)}:${String(kind || 'thumb')}`
+}
+
+const snsCoverStageKey = (cover) => {
+  const acc = String(selectedAccount.value || '').trim()
+  const cid = String(cover?.id || cover?.tid || cover?.createTime || '').trim()
+  return `sns:${acc}:cover:${cid || '0'}`
+}
+
+const snsMediaStageLabel = (key) => {
+  const k = String(key || '').trim()
+  if (!k) return ''
+  const info = snsMediaStage.value[k]
+  if (!info || typeof info !== 'object') return ''
+
+  const source = String(info?.source || '').trim()
+  const hitType = String(info?.hitType || '').trim()
+
+  if (source === 'remote-cache') return '远程缓存'
+  if (source === 'remote-decrypt') return '远程解密'
+  if (source === 'remote') return '远程直出'
+  if (source === 'deterministic-hash') return hitType ? `本地命中(${hitType})` : '本地命中'
+  if (source === 'manual-pick') return '手动匹配'
+  if (source === 'local-heuristic') return '本地兜底'
+  if (source === 'local-heuristic-next') return '本地兜底(跳过)'
+  if (source === 'browser-cache') return '浏览器缓存'
+  if (source === 'bkg-cover') return '封面缓存'
+  if (source === 'proxy') return '远程代理'
+  if (source === 'unknown') return '未知'
+  if (source === 'error') return '获取失败'
+  return source || '未知'
+}
+
+const snsMediaStageBadgeColorClass = (key) => {
+  const k = String(key || '').trim()
+  const source = String(snsMediaStage.value?.[k]?.source || '').trim()
+
+  if (source.startsWith('remote')) return 'bg-emerald-600/85 text-white'
+  if (source === 'deterministic-hash') return 'bg-sky-600/85 text-white'
+  if (source.startsWith('local')) return 'bg-blue-600/85 text-white'
+  if (source === 'manual-pick') return 'bg-amber-600/90 text-white'
+  if (source === 'browser-cache') return 'bg-slate-600/85 text-white'
+  if (source === 'proxy') return 'bg-fuchsia-600/85 text-white'
+  if (source === 'bkg-cover') return 'bg-indigo-600/85 text-white'
+  if (source === 'error') return 'bg-red-600/85 text-white'
+  return 'bg-black/50 text-white'
+}
+
+const snsMediaStageBadgeTitle = (key) => {
+  const k = String(key || '').trim()
+  const info = snsMediaStage.value?.[k]
+  if (!info || typeof info !== 'object') return ''
+  const source = String(info?.source || '').trim()
+  const hitType = String(info?.hitType || '').trim()
+  const xEnc = String(info?.xEnc || '').trim()
+
+  const parts = []
+  if (source) parts.push(`source=${source}`)
+  if (hitType) parts.push(`hit=${hitType}`)
+  if (xEnc) parts.push(`x-enc=${xEnc}`)
+  return parts.join(' · ')
+}
+
+const readSnsStageFromResourceTiming = (url) => {
+  try {
+    if (!process.client) return null
+    if (typeof performance === 'undefined' || !performance?.getEntriesByName) return null
+    const u = String(url || '').trim()
+    if (!u) return null
+    const entries = performance.getEntriesByName(u) || []
+    const latest = [...entries].reverse().find((e) => String(e?.entryType || '') === 'resource')
+    if (!latest) return null
+
+    // Prefer backend-injected stage info from `Server-Timing`.
+    const st = latest?.serverTiming
+    if (Array.isArray(st) && st.length > 0) {
+      let source = ''
+      let hitType = ''
+      let xEnc = ''
+      for (const item of st) {
+        const name = String(item?.name || '').trim()
+        const desc = String(item?.description || '').trim()
+        if (name === 'sns_source' && desc) source = desc
+        else if (name.startsWith('sns_source_')) source = name.slice('sns_source_'.length) || desc
+        else if (name === 'sns_hit' && desc) hitType = desc
+        else if (name.startsWith('sns_hit_')) hitType = name.slice('sns_hit_'.length) || desc
+        else if (name === 'sns_xenc' && desc) xEnc = desc
+        else if (name.startsWith('sns_xenc_')) xEnc = name.slice('sns_xenc_'.length) || desc
+      }
+      if (source) return { source, hitType, xEnc }
+    }
+
+    // When DevTools shows "(from disk cache)", browsers may not expose `serverTiming` at all.
+    // Best-effort: infer a browser cache hit from ResourceTiming sizes.
+    const transferSize = Number(latest?.transferSize)
+    if (Number.isFinite(transferSize) && transferSize === 0) {
+      return { source: 'browser-cache', hitType: 'transfer=0', xEnc: '' }
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+const ensureSnsMediaStage = async (key, url) => {
+  if (!process.client) return
+  const k = String(key || '').trim()
+  const u = String(url || '').trim()
+  if (!k || !u) return
+  if (!isSnsMediaApiUrl(u)) return
+
+  const existingSource = String(snsMediaStage.value?.[k]?.source || '').trim()
+  if (existingSource && existingSource !== 'unknown') return
+  if (snsMediaStageLoading.value[k]) return
+  if (snsMediaStageInFlight.has(k)) return
+
+  snsMediaStageInFlight.add(k)
+  snsMediaStageLoading.value[k] = true
+
+  try {
+    // Prefer stage info from the *same* request that loaded the <img>/<video> element
+    // (via Server-Timing + Timing-Allow-Origin), to avoid a non-idempotent extra fetch.
+    let info = null
+    for (const delayMs of [0, 0, 16, 50, 120, 250, 500]) {
+      if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs))
+      info = readSnsStageFromResourceTiming(u)
+      if (info) break
+    }
+    snsMediaStage.value[k] = info || { source: 'unknown', hitType: '', xEnc: '' }
+  } finally {
+    snsMediaStageLoading.value[k] = false
+    snsMediaStageInFlight.delete(k)
+  }
+}
+
+const eventCurrentSrc = (ev) => {
+  try {
+    const el = ev?.target || ev?.currentTarget
+    return String(el?.currentSrc || el?.src || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+const onSnsMediaLoaded = (post, m, idx = 0, ev) => {
+  const pid = String(post?.id || '').trim()
+  if (!pid) return
+  const key = snsMediaStageKey(pid, idx, 'thumb')
+  const u = eventCurrentSrc(ev) || getMediaThumbSrc(post, m, idx)
+  ensureSnsMediaStage(key, u)
+}
+
+const onCoverMediaLoaded = (cover, ev) => {
+  const c = cover || activeCover.value
+  if (!c || !Array.isArray(c.media) || c.media.length <= 0) return
+  const u = eventCurrentSrc(ev) || getSnsMediaUrl(c, c.media[0], 0, c.media[0].url)
+  ensureSnsMediaStage(snsCoverStageKey(c), u)
+}
+
+watch([selectedAccount, snsUseCache], () => {
+  snsMediaStage.value = {}
+  snsMediaStageLoading.value = {}
+  snsMediaStageInFlight.clear()
+})
+
+// Article card thumbnail is best-effort: try SNS media thumb first, then fall back to
+// extracting the cover from mp.weixin.qq.com HTML. Track per-post stage so we don't
+// keep showing a broken <img>.
+const articleThumbStage = ref({}) // postId -> 'proxy' | 'none'
+
+const selfInfo = ref({ wxid: '', nickname: '' })
+
+const loadSelfInfo = async () => {
+  if (!selectedAccount.value) return
+  try {
+    const resp = await $fetch(`${mediaBase}/api/sns/self_info?account=${encodeURIComponent(selectedAccount.value)}`)
+    if (resp && resp.wxid) {
+      selfInfo.value = resp
+    }
+  } catch (e) {
+    console.error('获取个人信息失败', e)
+  }
+}
+
+const loadSnsUsers = async () => {
+  const acc = String(selectedAccount.value || '').trim()
+  if (!acc) {
+    snsUsers.value = []
+    return
+  }
+
+  try {
+    const resp = await api.listSnsUsers({ account: acc, limit: 5000 })
+    snsUsers.value = Array.isArray(resp?.items) ? resp.items : []
+  } catch (e) {
+    console.error('加载朋友圈联系人失败', e)
+    snsUsers.value = []
+  }
+}
+
+const selectSnsUser = async (username) => {
+  const next = String(username || '').trim()
+  if (selectedSnsUser.value === next) return
+  selectedSnsUser.value = next
+  if (previewCtx.value) closeImagePreview()
+  await loadPosts({ reset: true })
+}
+
+const getArticleThumbProxyUrl = (contentUrl) => {
+  const u = String(contentUrl || '').trim()
+  if (!u) return ''
+  return `${mediaBase}/api/sns/article_thumb?url=${encodeURIComponent(u)}`
+}
+
+const guessOfficialAccountNameFromTitle = (title) => {
+  const t = String(title || '').trim()
+  if (!t) return ''
+  // Common patterns in Chinese titles: 《公众号名》, 「公众号名」, 【公众号名】
+  const m = /[《「【](.+?)[》」】]/.exec(t)
+  if (m && m[1]) return String(m[1]).trim()
+  return ''
+}
+
+const getArticleCardThumbCandidates = (post) => {
+  const list = Array.isArray(post?.media) ? post.media : []
+  const mediaSrc = list.length > 0 ? getMediaThumbSrc(post, list[0], 0) : ''
+  const proxySrc = getArticleThumbProxyUrl(post?.contentUrl)
+  return { mediaSrc, proxySrc }
+}
+
+const getArticleCardThumbSrc = (post) => {
+  const pid = String(post?.id || '').trim()
+  const { mediaSrc, proxySrc } = getArticleCardThumbCandidates(post)
+  const stage = String(articleThumbStage.value[pid] || '').trim()
+  if (stage === 'proxy') return proxySrc || ''
+  if (stage === 'none') return ''
+  return mediaSrc || proxySrc
+}
+
+const onArticleThumbError = (post) => {
+  const pid = String(post?.id || '').trim()
+  if (!pid) return
+
+  const { mediaSrc, proxySrc } = getArticleCardThumbCandidates(post)
+  const stage = String(articleThumbStage.value[pid] || '').trim()
+
+  if (stage === 'proxy') {
+    articleThumbStage.value[pid] = 'none'
+    return
+  }
+
+  // Default: try media first (if any), then fall back to proxy.
+  if (mediaSrc && proxySrc && mediaSrc !== proxySrc) {
+    articleThumbStage.value[pid] = 'proxy'
+  } else {
+    articleThumbStage.value[pid] = 'none'
+  }
+}
+
+const extractMpBizFromUrl = (contentUrl) => {
+  const u = String(contentUrl || '').trim()
+  if (!u) return ''
+  const m = /[?&]__biz=([^&#]+)/.exec(u)
+  if (!m?.[1]) return ''
+  try {
+    return decodeURIComponent(m[1])
+  } catch {
+    return String(m[1])
+  }
+}
+
+const getMomentOfficialAccount = (post) => {
+  const off = (post && typeof post.official === 'object' && post.official) ? post.official : null
+  const biz = String(off?.biz || extractMpBizFromUrl(post?.contentUrl) || '').trim()
+  const username = String(off?.username || '').trim()
+  const displayName = String(off?.displayName || '').trim() || guessOfficialAccountNameFromTitle(post?.title)
+  const st0 = off?.serviceType
+  const serviceType = (st0 === undefined || st0 === null || st0 === '') ? null : Number(st0)
+  return { biz, username, displayName, serviceType }
+}
+
+const getFinderFeedThumbSrc = (post) => {
+  const u = String(post?.finderFeed?.thumbUrl || '').trim()
+  if (!u) return ''
+  return getProxyExternalUrl(u)
+}
+
+const getMomentLinkCardUrl = (post) => {
+  const u = String(post?.contentUrl || '').trim()
+  if (u) return u
+
+  const list = Array.isArray(post?.media) ? post.media : []
+  const m0 = list.length > 0 ? list[0] : null
+  const u2 = String(m0?.url || '').trim()
+  return u2
+}
+
+const isExternalShareMoment = (post) => {
+  const t = Number(post?.type || 0)
+  return t === 42 || t === 5
+}
+
+const formatExternalShareUrlLabel = (url) => {
+  const u = String(url || '').trim()
+  if (!u) return ''
+  try {
+    const parsed = new URL(u)
+    const host = String(parsed.hostname || '').replace(/^www\\./, '')
+    const path = String(parsed.pathname || '')
+    const out = `${host}${path && path !== '/' ? path : ''}`
+    return out || u
+  } catch {
+    return u
+  }
+}
+
+const formatExternalSharePlaceholder = (post) => {
+  const t = Number(post?.type || 0)
+  if (t === 42) return '音乐'
+  return '链接'
+}
+
+const formatExternalShareCardTitle = (post) => {
+  const title = String(post?.title || '').trim()
+  if (title) return title
+  const u = String(getMomentLinkCardUrl(post) || '').trim()
+  if (u) return formatExternalShareUrlLabel(u)
+  const t = Number(post?.type || 0)
+  if (t === 42) return '音乐分享'
+  return '外部分享'
+}
+
+const getExternalShareCardThumbSrc = (post) => {
+  const pid = String(post?.id || '').trim()
+  if (!pid) return ''
+
+  const list = Array.isArray(post?.media) ? post.media : []
+  const m0 = list.length > 0 ? list[0] : null
+  if (!m0) return ''
+  if (hasMediaError(pid, 0)) return ''
+  return getMediaThumbSrc(post, m0, 0)
+}
+
+const onExternalShareCardThumbError = (post) => {
+  const pid = String(post?.id || '').trim()
+  if (!pid) return
+  onMediaError(pid, 0)
+}
+
+const formatFinderFeedCardText = (post) => {
+  const title = String(post?.title || '').trim()
+  if (title) return title
+
+  const desc = String(post?.finderFeed?.desc || '').trim()
+  if (desc) return desc.replace(/\s+/g, ' ')
+
+  const fallback = String(post?.contentDesc || '').trim()
+  return fallback ? fallback.replace(/\s+/g, ' ') : '视频号'
+}
+
+const formatMomentOfficialSource = (post) => {
+  if (Number(post?.type || 0) !== 3) return ''
+  const info = getMomentOfficialAccount(post)
+  // ServiceType: 1=服务号, 0=公众号 (when available). Fallbacks are best-effort.
+  const prefix = info.serviceType === 1 ? '服务号' : '公众号'
+
+  const name = String(info.displayName || '').trim()
+  return name ? `${prefix}·${name}` : prefix
+}
+
+const formatExternalShareSourceLabel = (post) => {
+  // Prefer DB-provided source name from Moments XML: `<appInfo><appName>...`
+  const n = String(post?.sourceName || '').trim()
+  if (n) return n
+
+  const url = String(getMomentLinkCardUrl(post) || '').trim()
+  if (!url) {
+    return Number(post?.type || 0) === 42 ? '音乐' : '外部分享'
+  }
+  return formatExternalShareUrlLabel(url)
+}
+
+const formatMomentTypeLabel = (post) => {
+  const t = Number(post?.type || 0)
+  if (!t) return ''
+  if (t === 3) return formatMomentOfficialSource(post)
+  if (t === 28) {
+    const name = String(post?.finderFeed?.nickname || '').trim()
+    return name ? `视频号·${name}` : '视频号'
+  }
+  if (isExternalShareMoment(post)) return formatExternalShareSourceLabel(post)
+  return ''
+}
+
+const onMomentTypeLabelClick = (post) => {
+  if (!process.client) return
+  const t = Number(post?.type || 0)
+  if (t !== 3) return
+
+  const info = getMomentOfficialAccount(post)
+  if (info.username) {
+    navigateTo(`/chat/${encodeURIComponent(info.username)}`)
+    return
+  }
+
+  // Fallback: open MP profile page by __biz
+  if (info.biz) {
+    const url = `https://mp.weixin.qq.com/mp/profile_ext?action=home&__biz=${encodeURIComponent(info.biz)}#wechat_redirect`
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
 }
 
 // Right-click context menu (copy text / JSON) to help debug SNS parsing issues.
@@ -665,11 +1430,14 @@ const onCopyPostJsonClick = async () => {
   }
 }
 
-const selfAvatarUrl = computed(() => {
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return ''
-  return `${mediaBase}/api/chat/avatar?account=${encodeURIComponent(acc)}&username=${encodeURIComponent(acc)}`
-})
+const onScroll = (e) => {
+  const { scrollTop, clientHeight, scrollHeight } = e.target
+  if (scrollTop + clientHeight >= scrollHeight - 200) {
+    if (hasMore.value && !isLoading.value) {
+      loadPosts({ reset: false })
+    }
+  }
+}
 
 const postAvatarUrl = (username) => {
   const acc = String(selectedAccount.value || '').trim()
@@ -705,7 +1473,7 @@ const upgradeTencentHttps = (u) => {
   if (!/^http:\/\//i.test(raw)) return raw
   try {
     const host = new URL(raw).hostname.toLowerCase()
-    if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn') || host.endsWith('.tc.qq.com')) {
+    if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn') || host.endsWith('.tc.qq.com') || host.endsWith('.video.qq.com')) {
       return raw.replace(/^http:\/\//i, 'https://')
     }
   } catch {}
@@ -761,7 +1529,7 @@ const getSnsMediaUrl = (post, m, idx, rawUrl) => {
         const h = String(m?.size?.height || m?.size?.h || '').trim()
         const ts = String(m?.size?.totalSize || m?.size?.total_size || m?.size?.total || '').trim()
         const sizeIdx = mediaSizeGroupIndex(post, m, idx)
-        const pick = getSnsMediaOverridePick(post?.id, idx)
+        // const pick = getSnsMediaOverridePick(post?.id, idx)
         let md5 = normalizeHex32(m?.urlAttrs?.md5 || m?.thumbAttrs?.md5 || m?.urlAttrs?.MD5 || m?.thumbAttrs?.MD5)
         if (!md5) {
           const match = /[?&]md5=([0-9a-fA-F]{16,32})/.exec(raw)
@@ -774,16 +1542,31 @@ const getSnsMediaUrl = (post, m, idx, rawUrl) => {
         if (h) parts.set('height', h)
         if (/^\d+$/.test(ts)) parts.set('total_size', ts)
         parts.set('idx', String(Number(sizeIdx) || 0))
-        if (pick) parts.set('pick', pick)
-        if (!pick && snsAvoidOtherPicked.value) {
-          const pid = String(post?.id || '').trim()
-          if (pid) parts.set('post_id', pid)
-          parts.set('avoid_picked', '1')
-          parts.set('pv', String(snsMediaOverrideRev.value || '0'))
-        }
+        const pid = String(post?.id || '').trim()
+        if (pid) parts.set('post_id', pid)
+
+        const mid = String(m?.id || '').trim()
+        if (mid) parts.set('media_id', mid)
+
+        const postType = String(post?.type || '1').trim()
+        if (postType) parts.set('post_type', postType)
+
+        const mediaType = String(m?.type || '2').trim()
+        if (mediaType) parts.set('media_type', mediaType)
+
+        const token = String(m?.token || m?.urlAttrs?.token || m?.thumbAttrs?.token || '').trim()
+        if (token) parts.set('token', token)
+
+        const key = String(m?.key || m?.urlAttrs?.key || m?.thumbAttrs?.key || '').trim()
+        if (key) parts.set('key', key)
+
+        parts.set('use_cache', snsUseCache.value ? '1' : '0')
+        // When cache is disabled, bust browser caching so backend really downloads+decrypts each time.
+        if (!snsUseCache.value) parts.set('_t', String(Date.now()))
+
         if (md5) parts.set('md5', md5)
         // Bump this when changing backend matching logic to avoid stale cached wrong images.
-        parts.set('v', '7')
+        parts.set('v', '9')
         parts.set('url', raw)
         return `${mediaBase}/api/sns/media?${parts.toString()}`
       }
@@ -799,6 +1582,151 @@ const getMediaThumbSrc = (post, m, idx = 0) => {
 
 const getMediaPreviewSrc = (post, m, idx = 0) => {
   return getSnsMediaUrl(post, m, idx, m?.url || m?.thumb)
+}
+
+
+const getSnsVideoUrl = (postId, mediaId) => {
+  // 本地缓存视频
+  const acc = String(selectedAccount.value || '').trim()
+  if (!acc || !postId || !mediaId) return ''
+  return `${mediaBase}/api/sns/video?account=${encodeURIComponent(acc)}&post_id=${encodeURIComponent(postId)}&media_id=${encodeURIComponent(mediaId)}`
+}
+
+const getSnsRemoteVideoSrc = (post, m) => {
+  // Remote mp4 (download+decrypt on backend; WeFlow compatible).
+  const acc = String(selectedAccount.value || '').trim()
+  const rawUrl = upgradeTencentHttps(String(m?.url || '').trim())
+  if (!acc || !rawUrl) return ''
+
+  const token = String(m?.token || m?.urlAttrs?.token || m?.thumbAttrs?.token || '').trim()
+  const key = String(m?.videoKey || m?.key || m?.urlAttrs?.key || '').trim()
+
+  const parts = new URLSearchParams()
+  parts.set('account', acc)
+  parts.set('url', rawUrl)
+  if (token) parts.set('token', token)
+  if (key) parts.set('key', key)
+  parts.set('use_cache', snsUseCache.value ? '1' : '0')
+  // When cache is disabled, bust browser caching so backend really downloads+decrypts each time.
+  if (!snsUseCache.value) parts.set('_t', String(Date.now()))
+  parts.set('v', '1')
+  return `${mediaBase}/api/sns/video_remote?${parts.toString()}`
+}
+
+const localVideoStatus = ref({})
+
+const videoStatusKey = (postId, mediaId) => `${String(postId)}:${String(mediaId)}`
+
+const onLocalVideoLoaded = (postId, mediaId) => {
+  localVideoStatus.value[videoStatusKey(postId, mediaId)] = 'loaded'
+}
+
+const onLocalVideoError = (postId, mediaId) => {
+  localVideoStatus.value[videoStatusKey(postId, mediaId)] = 'error'
+}
+
+
+const isLocalVideoLoaded = (postId, mediaId) => {
+  return localVideoStatus.value[videoStatusKey(postId, mediaId)] === 'loaded'
+}
+
+// 实况（Live Photo）：鼠标悬停播放远程解密视频
+const activeLivePhotoKey = ref('')
+const livePhotoVideoErrors = ref({})
+const livePhotoHoverVideoEl = ref(null)
+const livePhotoHoverMuted = ref(false)
+
+const livePhotoKey = (postId, idx) => `${String(postId || '')}:${String(idx || 0)}`
+
+const isLivePhotoMedia = (m) => {
+  const lp = m?.livePhoto
+  return !!(lp && typeof lp === 'object' && String(lp?.url || '').trim())
+}
+
+const isLivePhotoActive = (postId, idx) => activeLivePhotoKey.value === livePhotoKey(postId, idx)
+const hasLivePhotoVideoError = (postId, idx) => !!livePhotoVideoErrors.value[livePhotoKey(postId, idx)]
+
+const playLivePhotoHoverVideo = async ({ allowFallbackMute } = { allowFallbackMute: true }) => {
+  if (!process.client) return
+  const k = String(activeLivePhotoKey.value || '')
+  if (!k) return
+
+  await nextTick()
+  if (activeLivePhotoKey.value !== k) return
+
+  const el = livePhotoHoverVideoEl.value
+  if (!el) return
+
+  el.muted = !!livePhotoHoverMuted.value
+  try {
+    el.volume = livePhotoHoverMuted.value ? 0 : 1
+  } catch {}
+
+  try {
+    await el.play()
+  } catch {
+    if (allowFallbackMute && !livePhotoHoverMuted.value) {
+      livePhotoHoverMuted.value = true
+      await nextTick()
+      if (activeLivePhotoKey.value !== k) return
+      const el2 = livePhotoHoverVideoEl.value
+      if (!el2) return
+      el2.muted = true
+      try {
+        el2.volume = 0
+      } catch {}
+      try {
+        await el2.play()
+      } catch {}
+    }
+  }
+}
+
+const toggleLivePhotoHoverMuted = () => {
+  livePhotoHoverMuted.value = !livePhotoHoverMuted.value
+  void playLivePhotoHoverVideo({ allowFallbackMute: false })
+}
+
+const onLivePhotoEnter = (postId, idx, m) => {
+  if (!isLivePhotoMedia(m)) return
+  if (hasLivePhotoVideoError(postId, idx)) return
+  activeLivePhotoKey.value = livePhotoKey(postId, idx)
+  livePhotoHoverMuted.value = false
+  void playLivePhotoHoverVideo({ allowFallbackMute: true })
+}
+
+const onLivePhotoLeave = (postId, idx, m) => {
+  if (!isLivePhotoMedia(m)) return
+  const k = livePhotoKey(postId, idx)
+  if (activeLivePhotoKey.value === k) activeLivePhotoKey.value = ''
+}
+
+const onLivePhotoVideoError = (postId, idx) => {
+  const k = livePhotoKey(postId, idx)
+  livePhotoVideoErrors.value[k] = true
+  if (activeLivePhotoKey.value === k) activeLivePhotoKey.value = ''
+}
+
+const getLivePhotoVideoSrc = (post, m, idx = 0) => {
+  const acc = String(selectedAccount.value || '').trim()
+  const lp = (m && typeof m === 'object') ? m.livePhoto : null
+  const rawUrl = upgradeTencentHttps(String(lp?.url || '').trim())
+  if (!acc || !rawUrl) return ''
+
+  const token = String(lp?.token || m?.token || m?.urlAttrs?.token || '').trim()
+  const key = String(lp?.key || m?.videoKey || '').trim()
+
+  const parts = new URLSearchParams()
+  parts.set('account', acc)
+  parts.set('url', rawUrl)
+  if (token) parts.set('token', token)
+  if (key) parts.set('key', key)
+  parts.set('use_cache', snsUseCache.value ? '1' : '0')
+  // When cache is disabled, bust browser caching so backend really downloads+decrypts each time.
+  if (!snsUseCache.value) parts.set('_t', String(Date.now()))
+  // Version bump for frontend cache busting when endpoint changes.
+  parts.set('v', '1')
+  return `${mediaBase}/api/sns/video_remote?${parts.toString()}`
 }
 
 // 图片预览 + 候选匹配选择
@@ -828,52 +1756,74 @@ const previewSrc = computed(() => {
   return getMediaPreviewSrc(ctx.post, ctx.media, ctx.idx)
 })
 
-const previewHasUserOverride = computed(() => {
+const previewLivePhotoVideoSrc = computed(() => {
+  const ctx = previewCtx.value
+  if (!ctx) return ''
+  if (!isLivePhotoMedia(ctx.media)) return ''
+  return getLivePhotoVideoSrc(ctx.post, ctx.media, ctx.idx)
+})
+
+const previewLiveVideoEl = ref(null)
+const previewLivePhotoMuted = ref(false)
+
+const previewHasLivePhotoVideoError = computed(() => {
   const ctx = previewCtx.value
   if (!ctx) return false
-  return !!getSnsMediaOverridePick(ctx.post?.id, ctx.idx)
+  if (!isLivePhotoMedia(ctx.media)) return false
+  return hasLivePhotoVideoError(ctx.post?.id, ctx.idx)
 })
 
-const previewEffectiveIdx = computed(() => {
-  const ctx = previewCtx.value
-  if (!ctx) return null
-  const pick = getSnsMediaOverridePick(ctx.post?.id, ctx.idx)
-  if (pick) {
-    const found = (previewCandidates.items || []).find((c) => String(c?.key || '') === pick)
-    if (found) return Number(found.idx)
-    return null
-  }
-  const baseIdx = mediaSizeGroupIndex(ctx.post, ctx.media, ctx.idx)
-  if (!snsAvoidOtherPicked.value) return baseIdx
-  const curPid = String(ctx.post?.id || '').trim()
-  if (!curPid) return baseIdx
+const playPreviewLiveVideo = async ({ allowFallbackMute } = { allowFallbackMute: true }) => {
+  if (!process.client) return
+  await nextTick()
+  const el = previewLiveVideoEl.value
+  if (!el) return
 
-  // Mirror backend logic: skip candidates that were manually pinned to other posts.
-  const reserved = new Set()
+  el.muted = !!previewLivePhotoMuted.value
   try {
-    for (const [k, v] of Object.entries(snsMediaOverrides.value || {})) {
-      const pid = String(k || '').split(':', 1)[0].trim()
-      if (!pid || pid === curPid) continue
-      const key = String(v || '').trim()
-      if (key) reserved.add(key)
-    }
+    el.volume = previewLivePhotoMuted.value ? 0 : 1
   } catch {}
 
-  const items = Array.isArray(previewCandidates.items) ? [...previewCandidates.items] : []
-  items.sort((a, b) => Number(a?.idx || 0) - Number(b?.idx || 0))
-  for (const c of items) {
-    const i = Number(c?.idx)
-    const key = String(c?.key || '').trim()
-    if (!Number.isFinite(i) || i < baseIdx) continue
-    if (!key) continue
-    if (!reserved.has(key)) return i
+  try {
+    // Autoplay with sound may be blocked by browser policies; we fallback to muted playback so preview still animates.
+    await el.play()
+  } catch (e) {
+    if (allowFallbackMute && !previewLivePhotoMuted.value) {
+      previewLivePhotoMuted.value = true
+      await nextTick()
+      const el2 = previewLiveVideoEl.value
+      if (!el2) return
+      el2.muted = true
+      try {
+        el2.volume = 0
+      } catch {}
+      try {
+        await el2.play()
+      } catch {}
+    }
   }
-  return baseIdx
-})
-
-const toggleCandidatePanel = () => {
-  previewCandidatesOpen.value = !previewCandidatesOpen.value
 }
+
+const togglePreviewLivePhotoMuted = () => {
+  previewLivePhotoMuted.value = !previewLivePhotoMuted.value
+  void playPreviewLiveVideo({ allowFallbackMute: false })
+}
+
+const onPreviewLivePhotoVideoError = () => {
+  const ctx = previewCtx.value
+  if (!ctx) return
+  onLivePhotoVideoError(ctx.post?.id, ctx.idx)
+}
+
+watch(
+  () => previewLivePhotoVideoSrc.value,
+  (src) => {
+    if (!src) return
+    previewLivePhotoMuted.value = false
+    void playPreviewLiveVideo({ allowFallbackMute: true })
+  }
+)
+
 
 const loadPreviewCandidates = async ({ reset }) => {
   const ctx = previewCtx.value
@@ -929,6 +1879,17 @@ const loadPreviewCandidates = async ({ reset }) => {
 
 const openImagePreview = async (post, m, idx = 0) => {
   if (!process.client) return
+  // Stop any background hover-playing live photo when opening the preview.
+  activeLivePhotoKey.value = ''
+  // Preview is an intentional action; allow retry even if hover playback failed once.
+  if (isLivePhotoMedia(m)) {
+    const k = livePhotoKey(post?.id, idx)
+    if (k) {
+      try {
+        delete livePhotoVideoErrors.value[k]
+      } catch {}
+    }
+  }
   previewCtx.value = { post, media: m, idx: Number(idx) || 0 }
   previewCandidatesOpen.value = false
   resetPreviewCandidates()
@@ -945,64 +1906,26 @@ const closeImagePreview = () => {
   document.body.style.overflow = ''
 }
 
-const getPreviewCandidateSrc = (candIdx) => {
-  const ctx = previewCtx.value
-  const acc = String(selectedAccount.value || '').trim()
-  if (!ctx || !acc) return ''
-
-  const idxNum = Number(candIdx)
-  const cand = (previewCandidates.items || []).find((c) => Number(c?.idx) === idxNum)
-  const key = String(cand?.key || '').trim()
-  if (!key) return ''
-
-  const parts = new URLSearchParams()
-  parts.set('account', acc)
-  parts.set('pick', key)
-  const ct = String(ctx.post?.createTime || '').trim()
-  if (ct) parts.set('create_time', ct)
-  parts.set('v', '7')
-  return `${mediaBase}/api/sns/media?${parts.toString()}`
-}
-
-const selectCandidateForPreview = (candIdx) => {
-  const ctx = previewCtx.value
-  if (!ctx) return
-  const idxNum = Number(candIdx)
-  const cand = (previewCandidates.items || []).find((c) => Number(c?.idx) === idxNum)
-  const key = String(cand?.key || '').trim()
-  if (!key) return
-  setSnsMediaOverridePick(ctx.post?.id, ctx.idx, key)
-  // Allow <img> to retry after user switches candidates.
-  try {
-    delete mediaErrors.value[mediaErrorKey(ctx.post?.id, ctx.idx)]
-  } catch {}
-}
-
-const clearUserOverrideForPreview = () => {
-  const ctx = previewCtx.value
-  if (!ctx) return
-  setSnsMediaOverridePick(ctx.post?.id, ctx.idx, '')
-  try {
-    delete mediaErrors.value[mediaErrorKey(ctx.post?.id, ctx.idx)]
-  } catch {}
-}
-
-const loadMorePreviewCandidates = async () => {
-  if (previewCandidates.loading || previewCandidates.loadingMore) return
-  if (!previewCandidates.hasMore) return
-  await loadPreviewCandidates({ reset: false })
-}
-
 const onMediaClick = (post, m, idx = 0) => {
   if (!process.client) return
   const mt = Number(m?.type || 0)
-  // 视频：打开视频链接（新窗口），图片：打开预览
+
+  // 视频点击逻辑
   if (mt === 6) {
+    // Open a playable mp4 via backend (downloads+decrypts as needed).
+    const remoteUrl = getSnsRemoteVideoSrc(post, m)
+    if (remoteUrl) {
+      window.open(remoteUrl, '_blank', 'noopener,noreferrer')
+      return
+    }
+
+    // Last-resort: open raw CDN url.
     const u = String(m?.url || '').trim()
-     if (u) window.open(u, '_blank', 'noopener,noreferrer')
-     return
-   }
-  // Open preview overlay; it also loads local candidates for manual selection.
+    if (u) window.open(u, '_blank', 'noopener,noreferrer')
+    return
+  }
+
+  // 图片：打开预览
   void openImagePreview(post, m, idx)
 }
 
@@ -1026,15 +1949,9 @@ const formatRelativeTime = (tsSeconds) => {
 
 const loadAccounts = async () => {
   error.value = ''
-  try {
-    const resp = await api.listChatAccounts()
-    const accounts = resp?.accounts || []
-    availableAccounts.value = accounts
-    selectedAccount.value = selectedAccount.value || resp?.default_account || accounts[0] || null
-  } catch (e) {
-    error.value = e?.message || '加载账号失败'
-    availableAccounts.value = []
-    selectedAccount.value = null
+  await chatAccounts.ensureLoaded({ force: true })
+  if (!selectedAccount.value) {
+    error.value = chatAccounts.error || '未检测到已解密账号，请先解密数据库。'
   }
 }
 
@@ -1044,70 +1961,128 @@ const loadPosts = async ({ reset }) => {
   error.value = ''
   isLoading.value = true
   try {
-    const offset = reset ? 0 : posts.value.length
+    if (reset) {
+      timelineOffset.value = 0
+      hasMore.value = true
+      cachePagingExhausted.value = false
+      seenPostIds.clear()
+      posts.value = []
+      if (process.client && timelineScrollEl.value) {
+        try {
+          timelineScrollEl.value.scrollTop = 0
+        } catch {}
+      }
+    }
+    const offset = reset ? 0 : Number(timelineOffset.value || 0)
     const resp = await api.listSnsTimeline({
       account: selectedAccount.value,
       limit: pageSize,
-      offset
+      offset,
+      usernames: selectedSnsUser.value ? [String(selectedSnsUser.value).trim()] : []
     })
-    const items = resp?.timeline || []
-    if (reset) {
-      posts.value = items
-    } else {
-      posts.value = [...posts.value, ...items]
+    const items = Array.isArray(resp?.timeline) ? resp.timeline : []
+    // Advance offset by the number of rows consumed by the backend.
+    // When `hasMore` is true, the backend definitely scanned at least `limit` raw rows (even if it filtered some out).
+    // When `hasMore` is false, we're at the end, so advance by the actual returned count.
+    const limitUsed = Number(resp?.limit || pageSize) || pageSize
+    timelineOffset.value = offset + (resp?.hasMore ? limitUsed : items.length)
+
+    const nextItems = []
+    for (const p of items) {
+      if (!p || p.type === 7) continue
+      const pid = String(p.id || p.tid || '').trim()
+      if (pid) {
+        if (seenPostIds.has(pid)) continue
+        seenPostIds.add(pid)
+      }
+      nextItems.push(p)
     }
-    hasMore.value = !!resp?.hasMore
+
+    if (reset) {
+      posts.value = nextItems
+      coverData.value = resp?.cover || null
+      const cs = Array.isArray(resp?.covers) ? resp.covers : []
+      covers.value = cs.length > 0 ? cs : (resp?.cover ? [resp.cover] : [])
+      coverIndex.value = 0
+    } else {
+      posts.value = [...posts.value, ...nextItems]
+    }
+
+    // Keep sidebar count from lagging behind what we've already loaded (useful when sqlite snapshot is incomplete).
+    const selUname = String(selectedSnsUser.value || '').trim()
+    if (selUname && Array.isArray(snsUsers.value) && snsUsers.value.length > 0) {
+      const idx = snsUsers.value.findIndex((u) => String(u?.username || '').trim() === selUname)
+      if (idx >= 0) {
+        const cur = Number(snsUsers.value[idx]?.postCount || 0) || 0
+        if (posts.value.length > cur) {
+          const nextUsers = [...snsUsers.value]
+          nextUsers[idx] = { ...nextUsers[idx], postCount: posts.value.length }
+          snsUsers.value = nextUsers
+        }
+      }
+    }
+
+    const backendHasMore = !!resp?.hasMore
+    if (!backendHasMore && items.length === 0) {
+      cachePagingExhausted.value = true
+    }
+
+    const cachedTotal = selUname ? (Number(selectedSnsUserInfo.value?.postCount || 0) || 0) : 0
+    const shown = Array.isArray(posts.value) ? posts.value.length : 0
+    const allowCachePaging = !cachePagingExhausted.value && cachedTotal > 0 && shown < cachedTotal
+    hasMore.value = backendHasMore || allowCachePaging
   } catch (e) {
     error.value = e?.message || '加载朋友圈失败'
   } finally {
     isLoading.value = false
-  }
-}
 
-const goChat = async () => {
-  await navigateTo('/chat')
-}
-
-const goSns = async () => {
-  await navigateTo('/sns')
-}
-
-const goContacts = async () => {
-  await navigateTo('/contacts')
-}
-
-const goWrapped = async () => {
-  await navigateTo('/wrapped')
-}
-
-watch(
-  () => selectedAccount.value,
-  async (v, oldV) => {
-    if (v && v !== oldV) {
-      // Account switch: reload overrides and reset preview state.
-      loadSnsMediaOverrides()
-      loadSnsSettings()
-      void syncSnsMediaPicksToBackend()
-      if (previewCtx.value) closeImagePreview()
-      await loadPosts({ reset: true })
-    } else if (!v) {
-      snsMediaOverrides.value = {}
+    // Auto-trigger next page when we're already near bottom (e.g. first page too short to scroll,
+    // or we need to continue paging from cache after WCDB "visible subset" ends).
+    if (process.client) {
+      setTimeout(async () => {
+        try {
+          await nextTick()
+        } catch {}
+        if (error.value) return
+        if (isLoading.value || !hasMore.value) return
+        const el = timelineScrollEl.value
+        if (!el) return
+        const { scrollTop, clientHeight, scrollHeight } = el
+        if (scrollTop + clientHeight >= scrollHeight - 200) {
+          loadPosts({ reset: false })
+        }
+      }, 0)
     }
   }
-)
+}
+
 
 watch(
-  () => snsAvoidOtherPicked.value,
-  () => {
-    saveSnsSettings()
-  }
+    () => selectedAccount.value,
+    async (v, oldV) => {
+      if (v && v !== oldV) {
+        stopSnsExportPolling()
+        exportJob.value = null
+        exportError.value = ''
+        snsUserQuery.value = ''
+        selectedSnsUser.value = ''
+        snsUsers.value = []
+        activeLivePhotoKey.value = ''
+        livePhotoVideoErrors.value = {}
+        if (previewCtx.value) closeImagePreview()
+        await loadSelfInfo()
+        await loadSnsUsers()
+        await loadPosts({ reset: true })
+      }
+    },
+    { immediate: true }
 )
 
+
 onMounted(async () => {
+  privacyStore.init()
+  snsUseCache.value = readLocalBoolSetting(SNS_SETTING_USE_CACHE_KEY, true)
   await loadAccounts()
-  loadSnsMediaOverrides()
-  loadSnsSettings()
-  void syncSnsMediaPicksToBackend()
 })
 
 const onGlobalClick = () => {
@@ -1130,19 +2105,17 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (!process.client) return
+  stopSnsExportPolling()
   document.removeEventListener('click', onGlobalClick)
   document.removeEventListener('keydown', onGlobalKeyDown)
 })
+
+const getProxyExternalUrl = (url) => {
+  // 目前难以计算enc，代理获取封面图（thumbnail）
+  const u = String(url || '').trim()
+  if (!u) return ''
+  return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(u)}`
+}
+
+
 </script>
-
-<style scoped>
-/* 隐私模式模糊效果 */
-.privacy-blur {
-  filter: blur(9px);
-  transition: filter 0.2s ease;
-}
-
-.privacy-blur:hover {
-  filter: none;
-}
-</style>

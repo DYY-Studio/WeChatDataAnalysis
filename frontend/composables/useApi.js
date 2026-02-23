@@ -5,8 +5,10 @@ export const useApi = () => {
   // 基础请求函数
   const request = async (url, options = {}) => {
     try {
-      // 在客户端使用完整的API路径
-      const baseURL = process.client ? 'http://localhost:8000/api' : '/api'
+      // Default to same-origin `/api` so Nuxt devProxy / backend-mounted UI both work.
+      // Override via `NUXT_PUBLIC_API_BASE`, e.g. `http://127.0.0.1:8000/api`.
+      const apiBase = String(config?.public?.apiBase || '').trim()
+      const baseURL = (apiBase ? apiBase : '/api').replace(/\/$/, '')
       
       const response = await $fetch(url, {
         baseURL,
@@ -85,6 +87,75 @@ export const useApi = () => {
     if (params && params.source) query.set('source', params.source)
     const url = '/chat/messages' + (query.toString() ? `?${query.toString()}` : '')
     return await request(url)
+  }
+
+  const getChatMessageRaw = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.username) query.set('username', params.username)
+    if (params && params.message_id) query.set('message_id', params.message_id)
+    const url = '/chat/messages/raw' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  const editChatMessage = async (payload = {}) => {
+    return await request('/chat/messages/edit', {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  const repairChatMessageSender = async (payload = {}) => {
+    return await request('/chat/messages/repair_sender', {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  // Flip message direction in the WeChat client by swapping packed_info_data (unsafe, but undoable via reset).
+  const flipChatMessageDirection = async (payload = {}) => {
+    return await request('/chat/messages/flip_direction', {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  const listChatEditedSessions = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    const url = '/chat/edits/sessions' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  const listChatEditedMessages = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.username) query.set('username', params.username)
+    const url = '/chat/edits/messages' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  const getChatEditStatus = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.username) query.set('username', params.username)
+    if (params && params.message_id) query.set('message_id', params.message_id)
+    const url = '/chat/edits/message_status' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  const resetChatEditedMessage = async (payload = {}) => {
+    return await request('/chat/edits/reset_message', {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  const resetChatEditedSession = async (payload = {}) => {
+    return await request('/chat/edits/reset_session', {
+      method: 'POST',
+      body: payload
+    })
   }
 
   const getChatRealtimeStatus = async (params = {}) => {
@@ -180,6 +251,46 @@ export const useApi = () => {
     return await request(url)
   }
 
+  // 聊天记录日历热力图：某月每日消息数
+  const getChatMessageDailyCounts = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.username) query.set('username', params.username)
+    if (params && params.year != null) query.set('year', String(params.year))
+    if (params && params.month != null) query.set('month', String(params.month))
+    const url = '/chat/messages/daily_counts' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  // 聊天记录定位锚点：某日第一条 / 会话最早一条
+  const getChatMessageAnchor = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.username) query.set('username', params.username)
+    if (params && params.kind) query.set('kind', String(params.kind))
+    if (params && params.date) query.set('date', String(params.date))
+    const url = '/chat/messages/anchor' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  // 解析嵌套合并转发聊天记录（通过 server_id）
+  const resolveNestedChatHistory = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.server_id != null) query.set('server_id', String(params.server_id))
+    const url = '/chat/chat_history/resolve' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  // 解析卡片/小程序等 App 消息（通过 server_id）
+  const resolveAppMsg = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.server_id != null) query.set('server_id', String(params.server_id))
+    const url = '/chat/appmsg/resolve' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
   // 朋友圈时间线
   const listSnsTimeline = async (params = {}) => {
     const query = new URLSearchParams()
@@ -193,6 +304,16 @@ export const useApi = () => {
     }
     if (params && params.keyword) query.set('keyword', params.keyword)
     const url = '/sns/timeline' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  // 朋友圈联系人列表（按发圈数统计）
+  const listSnsUsers = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    if (params && params.keyword) query.set('keyword', String(params.keyword))
+    if (params && params.limit != null) query.set('limit', String(params.limit))
+    const url = '/sns/users' + (query.toString() ? `?${query.toString()}` : '')
     return await request(url)
   }
 
@@ -294,6 +415,8 @@ export const useApi = () => {
         media_kinds: Array.isArray(data.media_kinds) ? data.media_kinds : ['image', 'emoji', 'video', 'video_thumb', 'voice', 'file'],
         output_dir: data.output_dir == null ? null : String(data.output_dir || '').trim(),
         allow_process_key_extract: !!data.allow_process_key_extract,
+        download_remote_media: !!data.download_remote_media,
+        html_page_size: data.html_page_size != null ? Number(data.html_page_size) : 1000,
         privacy_mode: !!data.privacy_mode,
         file_name: data.file_name || null
       }
@@ -312,6 +435,31 @@ export const useApi = () => {
   const cancelChatExport = async (exportId) => {
     if (!exportId) throw new Error('Missing exportId')
     return await request(`/chat/exports/${encodeURIComponent(String(exportId))}`, { method: 'DELETE' })
+  }
+
+  // 朋友圈导出（离线 HTML zip）
+  const createSnsExport = async (data = {}) => {
+    return await request('/sns/exports', {
+      method: 'POST',
+      body: {
+        account: data.account || null,
+        scope: data.scope || 'selected',
+        usernames: Array.isArray(data.usernames) ? data.usernames : [],
+        use_cache: data.use_cache == null ? true : !!data.use_cache,
+        output_dir: data.output_dir == null ? null : String(data.output_dir || '').trim(),
+        file_name: data.file_name || null
+      }
+    })
+  }
+
+  const getSnsExport = async (exportId) => {
+    if (!exportId) throw new Error('Missing exportId')
+    return await request(`/sns/exports/${encodeURIComponent(String(exportId))}`)
+  }
+
+  const cancelSnsExport = async (exportId) => {
+    if (!exportId) throw new Error('Missing exportId')
+    return await request(`/sns/exports/${encodeURIComponent(String(exportId))}`, { method: 'DELETE' })
   }
 
   // 联系人
@@ -399,6 +547,15 @@ export const useApi = () => {
     listChatAccounts,
     listChatSessions,
     listChatMessages,
+    getChatMessageRaw,
+    editChatMessage,
+    repairChatMessageSender,
+    flipChatMessageDirection,
+    listChatEditedSessions,
+    listChatEditedMessages,
+    getChatEditStatus,
+    resetChatEditedMessage,
+    resetChatEditedSession,
     getChatRealtimeStatus,
     syncChatRealtimeMessages,
     syncChatRealtimeAll,
@@ -407,7 +564,12 @@ export const useApi = () => {
     buildChatSearchIndex,
     listChatSearchSenders,
     getChatMessagesAround,
+    getChatMessageDailyCounts,
+    getChatMessageAnchor,
+    resolveNestedChatHistory,
+    resolveAppMsg,
     listSnsTimeline,
+    listSnsUsers,
     listSnsMediaCandidates,
     saveSnsMediaPicks,
     openChatMediaFolder,
@@ -419,6 +581,9 @@ export const useApi = () => {
     getChatExport,
     listChatExports,
     cancelChatExport,
+    createSnsExport,
+    getSnsExport,
+    cancelSnsExport,
     listChatContacts,
     exportChatContacts,
     getWrappedAnnual,

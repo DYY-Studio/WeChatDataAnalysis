@@ -1,7 +1,7 @@
 <template>
   <div class="h-screen flex overflow-hidden" style="background-color: #EDEDED">
-    <!-- 左侧边栏 -->
-    <div class="border-r border-gray-200 flex flex-col" style="background-color: #e8e7e7; width: 60px; min-width: 60px; max-width: 60px">
+    <!-- Left sidebar rail is provided by `frontend/app.vue` -->
+    <div v-if="false" class="border-r border-gray-200 flex flex-col" style="background-color: #e8e7e7; width: 60px; min-width: 60px; max-width: 60px">
       <div class="flex-1 flex flex-col justify-start pt-0 gap-0">
         <!-- 头像（类似微信侧边栏） -->
         <div class="w-full h-[60px] flex items-center justify-center">
@@ -118,8 +118,7 @@
           @click="toggleRealtimeFromSidebar"
         >
           <div
-            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors"
-            :class="realtimeEnabled ? 'bg-[#DFF5E7]' : 'bg-transparent group-hover:bg-[#E1E1E1]'"
+            class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]"
           >
             <svg class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="realtimeEnabled ? 'text-[#07b75b]' : 'text-[#5d5d5d]'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M13 2L4 14h7l-1 8 9-12h-7z" />
@@ -130,7 +129,7 @@
         <!-- 隐私模式按钮 -->
         <div
           class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          @click="privacyMode = !privacyMode"
+          @click="togglePrivacyMode"
           :title="privacyMode ? '关闭隐私模式' : '开启隐私模式'"
         >
           <div
@@ -144,10 +143,10 @@
           </div>
         </div>
 
-        <!-- 设置按钮（仅桌面端）v-if="isDesktopEnv" -->
+        <!-- 设置按钮 -->
         <div
           class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          @click="openDesktopSettings"
+          @click="goSettings"
           title="设置"
         >
           <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
@@ -237,18 +236,30 @@
           <template v-else>
             <div v-for="contact in filteredContacts" :key="contact.id"
               class="px-3 cursor-pointer transition-colors duration-150 border-b border-gray-100 h-[calc(80px/var(--dpr))] flex items-center"
-              :class="selectedContact?.id === contact.id ? 'bg-[#DEDEDE] hover:bg-[#d3d3d3]' : 'hover:bg-[#eaeaea]'"
+              :class="contact.isTop
+                ? (selectedContact?.id === contact.id
+                    ? 'bg-[#D2D2D2] hover:bg-[#C7C7C7]'
+                    : 'bg-[#EAEAEA] hover:bg-[#DEDEDE]')
+                : (selectedContact?.id === contact.id
+                    ? 'bg-[#DEDEDE] hover:bg-[#d3d3d3]'
+                    : 'hover:bg-[#eaeaea]')"
               @click="selectContact(contact)">
               <div class="flex items-center space-x-3 w-full">
                 <!-- 联系人头像 -->
-                <div class="w-[calc(45px/var(--dpr))] h-[calc(45px/var(--dpr))] rounded-md overflow-hidden bg-gray-300 flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
-                  <div v-if="contact.avatar" class="w-full h-full">
-                    <img :src="contact.avatar" :alt="contact.name" class="w-full h-full object-cover" referrerpolicy="no-referrer" @error="onAvatarError($event, contact)">
+                <div class="relative flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
+                  <div class="w-[calc(45px/var(--dpr))] h-[calc(45px/var(--dpr))] rounded-md overflow-hidden bg-gray-300">
+                    <div v-if="contact.avatar" class="w-full h-full">
+                      <img :src="contact.avatar" :alt="contact.name" class="w-full h-full object-cover" referrerpolicy="no-referrer" @error="onAvatarError($event, contact)">
+                    </div>
+                    <div v-else class="w-full h-full flex items-center justify-center text-white text-xs font-bold"
+                      :style="{ backgroundColor: contact.avatarColor || '#4B5563' }">
+                      {{ contact.name.charAt(0) }}
+                    </div>
                   </div>
-                  <div v-else class="w-full h-full flex items-center justify-center text-white text-xs font-bold"
-                    :style="{ backgroundColor: contact.avatarColor || '#4B5563' }">
-                    {{ contact.name.charAt(0) }}
-                  </div>
+                  <span
+                    v-if="contact.unreadCount > 0"
+                    class="absolute z-10 -top-[calc(4px/var(--dpr))] -right-[calc(4px/var(--dpr))] w-[calc(10px/var(--dpr))] h-[calc(10px/var(--dpr))] bg-[#ed4d4d] rounded-full"
+                  ></span>
                 </div>
                 
                 <!-- 联系人信息 -->
@@ -256,13 +267,21 @@
                   <div class="flex items-center justify-between">
                     <h3 class="text-sm font-medium text-gray-900 truncate" :class="{ 'privacy-blur': privacyMode }">{{ contact.name }}</h3>
                     <div class="flex items-center flex-shrink-0 ml-2">
-                      <span v-if="contact.unreadCount > 0" class="text-[10px] text-white bg-red-500 rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center mr-2">
-                        {{ contact.unreadCount > 99 ? '99+' : contact.unreadCount }}
-                      </span>
                       <span class="text-xs text-gray-500">{{ contact.lastMessageTime }}</span>
                     </div>
                   </div>
-                  <p class="text-xs text-gray-500 truncate mt-0.5 leading-tight" :class="{ 'privacy-blur': privacyMode }">{{ contact.lastMessage }}</p>
+                  <p class="text-xs text-gray-500 truncate mt-0.5 leading-tight" :class="{ 'privacy-blur': privacyMode }">
+                    <span
+                      v-for="(seg, idx) in parseTextWithEmoji(
+                        (contact.unreadCount > 0 ? `[${contact.unreadCount > 99 ? '99+' : contact.unreadCount}条] ` : '') +
+                        String(contact.lastMessage || '')
+                      )"
+                      :key="idx"
+                    >
+                      <span v-if="seg.type === 'text'">{{ seg.content }}</span>
+                      <img v-else :src="seg.emojiSrc" :alt="seg.content" class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px" />
+                    </span>
+                  </p>
                 </div>
               </div>
             </div>
@@ -275,8 +294,6 @@
 
     <!-- 右侧聊天区域 -->
     <div class="flex-1 flex flex-col min-h-0" style="background-color: #EDEDED">
-      <!-- 桌面端将自绘标题栏放到右侧区域，避免遮挡左侧栏（更接近原生微信布局） -->
-      <DesktopTitleBar />
       <div class="flex-1 flex min-h-0">
       <!-- 聊天主区域 -->
       <div class="flex-1 flex flex-col min-h-0 min-w-0">
@@ -311,6 +328,20 @@
               </button>
               <button
                 class="header-btn-icon"
+                :class="{ 'header-btn-icon-active': reverseMessageSides }"
+                @click="toggleReverseMessageSides"
+                :disabled="!selectedContact"
+                :title="reverseMessageSides ? '取消反转消息位置' : '反转消息位置'"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7h14" />
+                  <path d="M14 3l4 4-4 4" />
+                  <path d="M20 17H6" />
+                  <path d="M10 13l-4 4 4 4" />
+                </svg>
+              </button>
+              <button
+                class="header-btn-icon"
                 :class="{ 'header-btn-icon-active': messageSearchOpen }"
                 @click="toggleMessageSearch"
                 :title="messageSearchOpen ? '关闭搜索 (Esc)' : '搜索聊天记录 (Ctrl+F)'"
@@ -318,6 +349,19 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 16 16">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7.33333 12.6667C10.2789 12.6667 12.6667 10.2789 12.6667 7.33333C12.6667 4.38781 10.2789 2 7.33333 2C4.38781 2 2 4.38781 2 7.33333C2 10.2789 4.38781 12.6667 7.33333 12.6667Z" />
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 14L11.1 11.1" />
+                </svg>
+              </button>
+              <button
+                class="header-btn-icon"
+                :class="{ 'header-btn-icon-active': timeSidebarOpen }"
+                @click="toggleTimeSidebar"
+                :disabled="!selectedContact || isLoadingMessages"
+                title="按日期定位"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 7V3m8 4V3M3 11h18" />
+                  <rect x="4" y="5" width="16" height="16" rx="2" ry="2" stroke-width="1.8" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 14h2m3 0h2m3 0h2M7 18h2m3 0h2" />
                 </svg>
               </button>
               <select
@@ -335,7 +379,7 @@
 
           <div v-if="searchContext.active" class="px-6 py-2 border-b border-emerald-200 bg-emerald-50 flex items-center gap-3">
             <div class="text-sm text-emerald-900">
-              已定位到搜索结果（上下文模式）
+              {{ searchContextBannerText }}
             </div>
             <div class="ml-auto flex items-center gap-2">
               <button
@@ -387,6 +431,7 @@
             ]"
             :data-server-id="message.serverIdStr || ''"
             :data-msg-id="message.id"
+            :data-create-time="message.createTime"
           >
             <div v-if="message.showTimeDivider" class="flex justify-center mb-4">
               <div class="px-3 py-1 text-xs text-[#9e9e9e]">
@@ -457,12 +502,20 @@
                             <div class="text-gray-900 break-all" :class="{ 'privacy-blur': privacyMode }">{{ contactProfileResolvedAlias || '-' }}</div>
                           </div>
                           <div class="px-3 py-2.5 flex items-start gap-3 border-b border-gray-100">
+                            <div class="w-12 text-gray-500 shrink-0">性别</div>
+                            <div class="text-gray-900 break-all" :class="{ 'privacy-blur': privacyMode }">{{ contactProfileResolvedGender || '-' }}</div>
+                          </div>
+                          <div class="px-3 py-2.5 flex items-start gap-3 border-b border-gray-100">
                             <div class="w-12 text-gray-500 shrink-0">地区</div>
                             <div class="text-gray-900 break-all" :class="{ 'privacy-blur': privacyMode }">{{ contactProfileResolvedRegion || '-' }}</div>
                           </div>
                           <div class="px-3 py-2.5 flex items-start gap-3 border-b border-gray-100">
                             <div class="w-12 text-gray-500 shrink-0">备注</div>
                             <div class="text-gray-900 break-all" :class="{ 'privacy-blur': privacyMode }">{{ contactProfileResolvedRemark || '-' }}</div>
+                          </div>
+                          <div class="px-3 py-2.5 flex items-start gap-3 border-b border-gray-100">
+                            <div class="w-12 text-gray-500 shrink-0">签名</div>
+                            <div class="text-gray-900 whitespace-pre-wrap break-words" :class="{ 'privacy-blur': privacyMode }">{{ contactProfileResolvedSignature || '-' }}</div>
                           </div>
                           <div class="px-3 py-2.5 flex items-start gap-3" :title="contactProfileResolvedSourceScene != null ? `来源场景码：${contactProfileResolvedSourceScene}` : ''">
                             <div class="w-12 text-gray-500 shrink-0">来源</div>
@@ -499,6 +552,7 @@
                     :fromAvatar="message.fromAvatar"
                     :from="message.from"
                     :isSent="message.isSent"
+                    :variant="message.linkCardVariant || 'default'"
                   />
                   <div v-else-if="message.renderType === 'file'"
                     class="wechat-redpacket-card wechat-special-card wechat-file-card msg-radius"
@@ -615,15 +669,15 @@
                         <img v-else :src="seg.emojiSrc" :alt="seg.content" class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px">
                       </span>
                     </div>
-                    <div
-                      v-if="message.quoteTitle || message.quoteContent"
-                      class="mt-[5px] px-2 text-xs text-neutral-600 rounded max-w-[404px] max-h-[61px] flex items-center bg-[#e1e1e1]">
-                      <div class="py-2 min-w-0 w-full">
-                        <div v-if="isQuotedVoice(message)" class="flex items-center gap-1 min-w-0">
-                          <span v-if="message.quoteTitle" class="truncate flex-shrink-0">{{ message.quoteTitle }}:</span>
-                          <button
-                            type="button"
-                            class="flex items-center gap-1 min-w-0 hover:opacity-80"
+                      <div
+                        v-if="message.quoteTitle || message.quoteContent"
+                       class="mt-[5px] px-2 text-xs text-neutral-600 rounded max-w-[404px] max-h-[65px] overflow-hidden flex items-start bg-[#e1e1e1]">
+                       <div class="py-2 min-w-0 flex-1">
+                         <div v-if="isQuotedVoice(message)" class="flex items-center gap-1 min-w-0">
+                           <span v-if="message.quoteTitle" class="truncate flex-shrink-0">{{ message.quoteTitle }}:</span>
+                           <button
+                             type="button"
+                             class="flex items-center gap-1 min-w-0 hover:opacity-80"
                             :disabled="!message.quoteVoiceUrl"
                             :class="!message.quoteVoiceUrl ? 'opacity-60 cursor-not-allowed' : ''"
                             @click.stop="message.quoteVoiceUrl && playQuoteVoice(message)"
@@ -646,13 +700,65 @@
                             :ref="el => setVoiceRef(getQuoteVoiceId(message), el)"
                             :src="message.quoteVoiceUrl"
                             preload="none"
-                            class="hidden"
-                          ></audio>
-                        </div>
-                        <div v-else class="line-clamp-2">{{ message.quoteTitle ? (message.quoteTitle + ': ') : '' }}{{ message.quoteContent }}</div>
-                      </div>
-                    </div>
-                  </template>
+                             class="hidden"
+                           ></audio>
+                         </div>
+                         <div v-else class="min-w-0 flex items-start">
+                           <template v-if="isQuotedLink(message)">
+                             <div class="line-clamp-2 min-w-0 flex-1">
+                               <span v-if="message.quoteTitle">{{ message.quoteTitle }}:</span>
+                               <span
+                                 v-if="getQuotedLinkText(message)"
+                                 :class="message.quoteTitle ? 'ml-1' : ''"
+                               >
+                                 🔗 {{ getQuotedLinkText(message) }}
+                               </span>
+                             </div>
+                           </template>
+                           <template v-else>
+                             <div class="line-clamp-2 min-w-0 flex-1">
+                               <span v-if="message.quoteTitle">{{ message.quoteTitle }}:</span>
+                               <span
+                                 v-if="message.quoteContent && !(isQuotedImage(message) && message.quoteTitle && message.quoteImageUrl && !message._quoteImageError)"
+                                 :class="message.quoteTitle ? 'ml-1' : ''"
+                               >
+                                 {{ message.quoteContent }}
+                               </span>
+                             </div>
+                           </template>
+                         </div>
+                       </div>
+                       <div
+                         v-if="isQuotedLink(message) && message.quoteThumbUrl && !message._quoteThumbError"
+                         class="ml-2 my-2 flex-shrink-0 max-w-[98px] max-h-[49px] overflow-hidden flex items-center justify-center cursor-pointer"
+                         @click.stop="openImagePreview(message.quoteThumbUrl)"
+                       >
+                         <img
+                           :src="message.quoteThumbUrl"
+                           alt="引用链接缩略图"
+                           class="max-h-[49px] w-auto max-w-[98px] object-contain"
+                           loading="lazy"
+                           decoding="async"
+                           referrerpolicy="no-referrer"
+                           @error="onQuoteThumbError(message)"
+                         />
+                       </div>
+                       <div
+                         v-if="!isQuotedLink(message) && isQuotedImage(message) && message.quoteImageUrl && !message._quoteImageError"
+                         class="ml-2 my-2 flex-shrink-0 max-w-[98px] max-h-[49px] overflow-hidden flex items-center justify-center cursor-pointer"
+                         @click.stop="openImagePreview(message.quoteImageUrl)"
+                       >
+                         <img
+                           :src="message.quoteImageUrl"
+                           alt="引用图片"
+                           class="max-h-[49px] w-auto max-w-[98px] object-contain"
+                           loading="lazy"
+                           decoding="async"
+                           @error="onQuoteImageError(message)"
+                         />
+                       </div>
+                     </div>
+                   </template>
                   <!-- 合并转发聊天记录（Chat History） -->
                   <div
                     v-else-if="message.renderType === 'chatHistory'"
@@ -678,9 +784,10 @@
                   </div>
                   <div v-else-if="message.renderType === 'transfer'"
                     class="wechat-transfer-card msg-radius"
-                    :class="[{ 'wechat-transfer-received': message.transferReceived, 'wechat-transfer-returned': isTransferReturned(message) }, message.isSent ? 'wechat-transfer-sent-side' : 'wechat-transfer-received-side']">
+                    :class="[{ 'wechat-transfer-received': message.transferReceived, 'wechat-transfer-returned': isTransferReturned(message), 'wechat-transfer-overdue': isTransferOverdue(message) }, message.isSent ? 'wechat-transfer-sent-side' : 'wechat-transfer-received-side']">
                     <div class="wechat-transfer-content">
                       <img src="/assets/images/wechat/wechat-returned.png" v-if="isTransferReturned(message)" class="wechat-transfer-icon" alt="">
+                      <img src="/assets/images/wechat/overdue.png" v-else-if="isTransferOverdue(message)" class="wechat-transfer-icon" alt="">
                       <img src="/assets/images/wechat/wechat-trans-icon2.png" v-else-if="message.transferReceived" class="wechat-transfer-icon" alt="">
                       <img src="/assets/images/wechat/wechat-trans-icon1.png" v-else class="wechat-transfer-icon" alt="">
                       <div class="wechat-transfer-info">
@@ -757,6 +864,122 @@
         </div>
       </div>
     </div>
+
+    <!-- 右侧时间侧边栏（按日期定位） -->
+    <transition name="sidebar-slide">
+      <div v-if="timeSidebarOpen" class="time-sidebar">
+        <div class="time-sidebar-header">
+          <div class="time-sidebar-title">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3M3 11h18" />
+              <rect x="4" y="5" width="16" height="16" rx="2" ry="2" stroke-width="2" />
+            </svg>
+            <span>按日期定位</span>
+          </div>
+          <button
+            type="button"
+            class="time-sidebar-close"
+            @click="closeTimeSidebar"
+            title="关闭 (Esc)"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="time-sidebar-body">
+          <div class="calendar-header">
+            <button
+              type="button"
+              class="calendar-nav-btn"
+              :disabled="timeSidebarLoading"
+              title="上个月"
+              @click="prevTimeSidebarMonth"
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <div class="calendar-month-label calendar-month-label-selects">
+              <select
+                v-model.number="timeSidebarYear"
+                class="calendar-ym-select"
+                :disabled="timeSidebarLoading"
+                title="选择年份"
+                @change="onTimeSidebarYearMonthChange"
+              >
+                <option v-for="y in timeSidebarYearOptions" :key="y" :value="y">
+                  {{ y }}年
+                </option>
+              </select>
+              <select
+                v-model.number="timeSidebarMonth"
+                class="calendar-ym-select"
+                :disabled="timeSidebarLoading"
+                title="选择月份"
+                @change="onTimeSidebarYearMonthChange"
+              >
+                <option v-for="mm in 12" :key="mm" :value="mm">
+                  {{ mm }}月
+                </option>
+              </select>
+            </div>
+            <button
+              type="button"
+              class="calendar-nav-btn"
+              :disabled="timeSidebarLoading"
+              title="下个月"
+              @click="nextTimeSidebarMonth"
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+
+          <div v-if="timeSidebarError" class="time-sidebar-status time-sidebar-status-error">
+            {{ timeSidebarError }}
+          </div>
+          <div v-else class="time-sidebar-status">
+            <span v-if="timeSidebarLoading">加载中...</span>
+            <span v-else>本月 {{ timeSidebarTotal }} 条消息，{{ timeSidebarActiveDays }} 天有聊天</span>
+          </div>
+
+          <div class="calendar-weekdays">
+            <div v-for="w in timeSidebarWeekdays" :key="w" class="calendar-weekday">{{ w }}</div>
+          </div>
+
+          <div class="calendar-grid">
+            <button
+              v-for="cell in timeSidebarCalendarCells"
+              :key="cell.key"
+              type="button"
+              class="calendar-day"
+              :class="cell.className"
+              :style="cell.style"
+              :disabled="cell.disabled"
+              :title="cell.title"
+              @click="onTimeSidebarDayClick(cell)"
+            >
+              <span v-if="cell.day" class="calendar-day-number">{{ cell.day }}</span>
+            </button>
+          </div>
+
+          <div class="time-sidebar-actions">
+            <button
+              type="button"
+              class="time-sidebar-action-btn"
+              :disabled="timeSidebarLoading || !selectedContact || isLoadingMessages"
+              @click="jumpToConversationFirst"
+              title="定位到会话最早消息附近"
+            >
+              跳转到顶部
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
 
     <!-- 右侧搜索侧边栏 -->
     <transition name="sidebar-slide">
@@ -1149,7 +1372,7 @@
 
     <!-- 图片预览弹窗 (全局固定定位) -->
     <div v-if="previewImageUrl" 
-      class="fixed inset-0 z-50 bg-black/90 flex items-center justify-center cursor-zoom-out"
+      class="fixed inset-0 z-[13000] bg-black/90 flex items-center justify-center cursor-zoom-out"
       @click="closeImagePreview">
       <img :src="previewImageUrl" alt="预览" class="max-w-[90vw] max-h-[90vh] object-contain" @click.stop>
       <button 
@@ -1161,6 +1384,279 @@
       </button>
     </div>
 
+    <!-- 浮动窗口（可拖动）：合并消息 / 链接卡片 -->
+    <div
+      v-for="win in floatingWindows"
+      :key="win.id"
+      class="fixed"
+      :style="{ left: win.x + 'px', top: win.y + 'px', zIndex: win.zIndex }"
+      @mousedown="focusFloatingWindow(win.id)"
+    >
+      <div
+        class="bg-[#f7f7f7] rounded-xl shadow-xl overflow-hidden border border-gray-200 flex flex-col"
+        :style="{ width: win.width + 'px', height: win.height + 'px' }"
+      >
+        <div
+          class="px-3 py-2 bg-[#f7f7f7] border-b border-gray-200 flex items-center justify-between select-none cursor-move"
+          @mousedown.stop="startFloatingWindowDrag(win.id, $event)"
+          @touchstart.stop="startFloatingWindowDrag(win.id, $event)"
+        >
+          <div class="text-sm text-[#161616] truncate min-w-0">{{ win.title || (win.kind === 'link' ? '链接' : '聊天记录') }}</div>
+          <button
+            type="button"
+            class="p-2 rounded hover:bg-black/5 flex-shrink-0"
+            @click.stop="closeFloatingWindow(win.id)"
+            aria-label="关闭"
+            title="关闭"
+          >
+            <svg class="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-auto bg-[#f7f7f7]">
+          <!-- Chat history window -->
+          <template v-if="win.kind === 'chatHistory'">
+            <div v-if="win.loading" class="text-xs text-gray-500 text-center py-2">加载中...</div>
+            <div v-if="!win.records || !win.records.length" class="text-sm text-gray-500 text-center py-10">
+              没有可显示的聊天记录
+            </div>
+            <template v-else>
+              <div
+                v-for="(rec, idx) in win.records"
+                :key="rec.id || idx"
+                class="px-4 py-3 flex gap-3 border-b border-gray-100 bg-[#f7f7f7]"
+              >
+                <div class="w-9 h-9 rounded-md overflow-hidden bg-gray-200 flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
+                  <img
+                    v-if="rec.senderAvatar"
+                    :src="rec.senderAvatar"
+                    alt="头像"
+                    class="w-full h-full object-cover"
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <div v-else class="w-full h-full flex items-center justify-center text-xs font-bold text-gray-600">
+                    {{ (rec.senderDisplayName || rec.sourcename || '?').charAt(0) }}
+                  </div>
+                </div>
+
+                <div class="min-w-0 flex-1" :class="{ 'privacy-blur': privacyMode }">
+                  <div class="flex items-start gap-2">
+                    <div class="min-w-0 flex-1">
+                      <div
+                        v-if="win.info?.isChatRoom && (rec.senderDisplayName || rec.sourcename)"
+                        class="text-xs text-gray-500 leading-none truncate mb-1"
+                      >
+                        {{ rec.senderDisplayName || rec.sourcename }}
+                      </div>
+                    </div>
+                    <div v-if="rec.fullTime || rec.sourcetime" class="text-xs text-gray-400 flex-shrink-0 leading-none">
+                      {{ rec.fullTime || rec.sourcetime }}
+                    </div>
+                  </div>
+
+                  <div class="mt-1">
+                    <!-- Nested chat history -->
+                    <div
+                      v-if="rec.renderType === 'chatHistory'"
+                      class="wechat-chat-history-card wechat-special-card msg-radius cursor-pointer"
+                      @click.stop="openNestedChatHistory(rec)"
+                    >
+                      <div class="wechat-chat-history-body">
+                        <div class="wechat-chat-history-title">{{ rec.title || '聊天记录' }}</div>
+                        <div class="wechat-chat-history-preview" v-if="getChatHistoryPreviewLines(rec).length">
+                          <div
+                            v-for="(line, lidx) in getChatHistoryPreviewLines(rec)"
+                            :key="lidx"
+                            class="wechat-chat-history-line"
+                          >
+                            {{ line }}
+                          </div>
+                        </div>
+                      </div>
+                      <div class="wechat-chat-history-bottom">
+                        <span>聊天记录</span>
+                      </div>
+                    </div>
+
+                    <!-- Link card -->
+                    <div
+                      v-else-if="rec.renderType === 'link'"
+                      class="wechat-link-card wechat-special-card msg-radius cursor-pointer"
+                      @click.stop="openChatHistoryLinkWindow(rec)"
+                      @contextmenu="openMediaContextMenu($event, rec, 'message')"
+                    >
+                      <div class="wechat-link-content">
+                        <div class="wechat-link-info">
+                          <div class="wechat-link-title">{{ rec.title || rec.content || rec.url || '链接' }}</div>
+                          <div v-if="rec.content" class="wechat-link-desc">{{ rec.content }}</div>
+                        </div>
+                        <div v-if="rec.preview" class="wechat-link-thumb">
+                          <img :src="rec.preview" :alt="rec.title || '链接预览'" class="wechat-link-thumb-img" referrerpolicy="no-referrer" loading="lazy" decoding="async" @error="onChatHistoryLinkPreviewError(rec)" />
+                        </div>
+                      </div>
+                      <div class="wechat-link-from">
+                        <div class="wechat-link-from-avatar" :style="rec._fromAvatarImgOk ? { background: '#fff', color: 'transparent' } : null" aria-hidden="true">
+                          <span v-if="(!rec.fromAvatar) || (!rec._fromAvatarImgOk)">{{ getChatHistoryLinkFromAvatarText(rec) || '\u200B' }}</span>
+                          <img
+                            v-if="rec.fromAvatar && !rec._fromAvatarImgError"
+                            :src="rec.fromAvatar"
+                            alt=""
+                            class="wechat-link-from-avatar-img"
+                            referrerpolicy="no-referrer"
+                            loading="lazy"
+                            decoding="async"
+                            @load="onChatHistoryFromAvatarLoad(rec)"
+                            @error="onChatHistoryFromAvatarError(rec)"
+                          />
+                        </div>
+                        <div class="wechat-link-from-name">{{ getChatHistoryLinkFromText(rec) || '\u200B' }}</div>
+                      </div>
+                    </div>
+
+                    <!-- Image -->
+                    <div
+                      v-else-if="rec.renderType === 'image'"
+                      class="msg-radius overflow-hidden cursor-pointer inline-block"
+                      @click="rec.imageUrl && openImagePreview(rec.imageUrl)"
+                      @contextmenu="openMediaContextMenu($event, rec, 'image')"
+                    >
+                      <img
+                        v-if="rec.imageUrl"
+                        :src="rec.imageUrl"
+                        alt="图片"
+                        class="max-w-[240px] max-h-[240px] object-cover hover:opacity-90 transition-opacity"
+                      />
+                      <div v-else class="px-3 py-2 text-sm text-gray-700">{{ rec.content || '[图片]' }}</div>
+                    </div>
+
+                    <!-- Emoji -->
+                    <div
+                      v-else-if="rec.renderType === 'emoji'"
+                      class="inline-block"
+                      @contextmenu="openMediaContextMenu($event, rec, 'emoji')"
+                    >
+                      <img v-if="rec.emojiUrl" :src="rec.emojiUrl" alt="表情" class="w-24 h-24 object-contain" />
+                      <div v-else class="px-3 py-2 text-sm text-gray-700">{{ rec.content || '[表情]' }}</div>
+                    </div>
+
+                    <!-- Video (fallback to thumbnail/play) -->
+                    <div
+                      v-else-if="rec.renderType === 'video'"
+                      class="msg-radius overflow-hidden relative bg-black/5 inline-block"
+                      @contextmenu="openMediaContextMenu($event, rec, 'video')"
+                    >
+                      <img
+                        v-if="rec.videoThumbUrl && !rec._videoThumbError"
+                        :src="rec.videoThumbUrl"
+                        alt="视频"
+                        class="block w-[220px] max-w-[260px] h-auto max-h-[260px] object-cover"
+                        @error="onChatHistoryVideoThumbError(rec)"
+                      />
+                      <div v-else class="px-3 py-2 text-sm text-gray-700">{{ rec.content || '[视频]' }}</div>
+                      <a
+                        v-if="rec.videoUrl"
+                        :href="rec.videoUrl"
+                        target="_blank"
+                        rel="noreferrer"
+                        class="absolute inset-0 flex items-center justify-center"
+                      >
+                        <div class="w-12 h-12 rounded-full bg-black/45 flex items-center justify-center">
+                          <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                        </div>
+                      </a>
+                      <div
+                        v-if="rec.videoDuration"
+                        class="absolute bottom-2 right-2 text-xs text-white bg-black/55 px-1.5 py-0.5 rounded"
+                      >
+                        {{ formatChatHistoryVideoDuration(rec.videoDuration) }}
+                      </div>
+                    </div>
+
+                    <!-- Text / others -->
+                    <div
+                      v-else
+                      class="text-sm text-gray-900 whitespace-pre-wrap break-words leading-relaxed"
+                      @contextmenu="openMediaContextMenu($event, rec, 'message')"
+                    >
+                      <span v-for="(seg, sidx) in parseTextWithEmoji(rec.content)" :key="sidx">
+                        <span v-if="seg.type === 'text'">{{ seg.content }}</span>
+                        <img v-else :src="seg.emojiSrc" :alt="seg.content" class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px">
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </template>
+
+          <!-- Link detail window -->
+          <template v-else-if="win.kind === 'link'">
+            <div class="p-4 space-y-3">
+              <div
+                class="wechat-link-card wechat-special-card msg-radius cursor-pointer"
+                @click.stop="win.url && openUrlInBrowser(win.url)"
+                @contextmenu="openMediaContextMenu($event, win, 'message')"
+              >
+                <div class="wechat-link-content">
+                  <div class="wechat-link-info">
+                    <div class="wechat-link-title">{{ win.title || win.url || '链接' }}</div>
+                    <div v-if="win.content" class="wechat-link-desc">{{ win.content }}</div>
+                  </div>
+                  <div v-if="win.preview" class="wechat-link-thumb">
+                    <img :src="win.preview" :alt="win.title || '链接预览'" class="wechat-link-thumb-img" referrerpolicy="no-referrer" loading="lazy" decoding="async" @error="onChatHistoryLinkPreviewError(win)" />
+                  </div>
+                </div>
+                <div class="wechat-link-from">
+                  <div class="wechat-link-from-avatar" :style="win._fromAvatarImgOk ? { background: '#fff', color: 'transparent' } : null" aria-hidden="true">
+                    <span v-if="(!win.fromAvatar) || (!win._fromAvatarImgOk)">{{ getChatHistoryLinkFromAvatarText(win) || '\u200B' }}</span>
+                    <img
+                      v-if="win.fromAvatar && !win._fromAvatarImgError"
+                      :src="win.fromAvatar"
+                      alt=""
+                      class="wechat-link-from-avatar-img"
+                      referrerpolicy="no-referrer"
+                      loading="lazy"
+                      decoding="async"
+                      @load="onChatHistoryFromAvatarLoad(win)"
+                      @error="onChatHistoryFromAvatarError(win)"
+                    />
+                  </div>
+                  <div class="wechat-link-from-name">{{ getChatHistoryLinkFromText(win) || '\u200B' }}</div>
+                </div>
+              </div>
+
+              <div v-if="win.loading" class="text-xs text-gray-500">解析中...</div>
+              <div v-if="win.url" class="text-xs text-gray-500 break-all">{{ win.url }}</div>
+              <div class="flex gap-2">
+                <button
+                  class="px-3 py-1.5 text-sm rounded-md border border-gray-200 bg-white hover:bg-gray-50"
+                  type="button"
+                  :disabled="!win.url"
+                  :class="!win.url ? 'opacity-50 cursor-not-allowed' : ''"
+                  @click.stop="win.url && openUrlInBrowser(win.url)"
+                >
+                  在浏览器打开
+                </button>
+                <button
+                  class="px-3 py-1.5 text-sm rounded-md border border-gray-200 bg-white hover:bg-gray-50"
+                  type="button"
+                  :disabled="!win.url"
+                  :class="!win.url ? 'opacity-50 cursor-not-allowed' : ''"
+                  @click.stop="win.url && copyTextToClipboard(win.url)"
+                >
+                  复制链接
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- 合并转发聊天记录弹窗 -->
     <div
       v-if="chatHistoryModalVisible"
@@ -1168,11 +1664,25 @@
       @click="closeChatHistoryModal"
     >
       <div
-        class="w-[92vw] max-w-[560px] max-h-[80vh] bg-white rounded-xl shadow-xl overflow-hidden flex flex-col"
+        class="w-[92vw] max-w-[560px] max-h-[80vh] bg-[#f7f7f7] rounded-xl shadow-xl overflow-hidden flex flex-col"
         @click.stop
       >
-        <div class="px-4 py-3 bg-neutral-100 border-b border-gray-200 flex items-center justify-between">
-          <div class="text-sm text-[#161616] truncate">{{ chatHistoryModalTitle || '聊天记录' }}</div>
+        <div class="px-4 py-3 bg-[#f7f7f7] border-b border-gray-200 flex items-center justify-between">
+          <div class="flex items-center gap-2 min-w-0">
+            <button
+              v-if="chatHistoryModalStack.length"
+              type="button"
+              class="p-2 rounded hover:bg-black/5 flex-shrink-0"
+              @click="goBackChatHistoryModal"
+              aria-label="返回"
+              title="返回"
+            >
+              <svg class="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <div class="text-sm text-[#161616] truncate">{{ chatHistoryModalTitle || '聊天记录' }}</div>
+          </div>
           <button
             type="button"
             class="p-2 rounded hover:bg-black/5"
@@ -1186,7 +1696,7 @@
           </button>
         </div>
 
-        <div class="flex-1 overflow-auto bg-white">
+        <div class="flex-1 overflow-auto bg-[#f7f7f7]">
           <div v-if="!chatHistoryModalRecords.length" class="text-sm text-gray-500 text-center py-10">
             没有可显示的聊天记录
           </div>
@@ -1194,7 +1704,7 @@
             <div
               v-for="(rec, idx) in chatHistoryModalRecords"
               :key="rec.id || idx"
-              class="px-4 py-3 flex gap-3 border-b border-gray-100"
+              class="px-4 py-3 flex gap-3 border-b border-gray-100 bg-[#f7f7f7]"
             >
               <div class="w-9 h-9 rounded-md overflow-hidden bg-gray-200 flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
                 <img
@@ -1202,6 +1712,9 @@
                   :src="rec.senderAvatar"
                   alt="头像"
                   class="w-full h-full object-cover"
+                  referrerpolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <div v-else class="w-full h-full flex items-center justify-center text-xs font-bold text-gray-600">
                   {{ (rec.senderDisplayName || rec.sourcename || '?').charAt(0) }}
@@ -1224,9 +1737,67 @@
                 </div>
 
                   <div class="mt-1">
+                  <!-- 合并转发聊天记录（Chat History） -->
+                  <div
+                    v-if="rec.renderType === 'chatHistory'"
+                    class="wechat-chat-history-card wechat-special-card msg-radius cursor-pointer"
+                    @click.stop="openNestedChatHistory(rec)"
+                  >
+                    <div class="wechat-chat-history-body">
+                      <div class="wechat-chat-history-title">{{ rec.title || '聊天记录' }}</div>
+                      <div class="wechat-chat-history-preview" v-if="getChatHistoryPreviewLines(rec).length">
+                        <div
+                          v-for="(line, lidx) in getChatHistoryPreviewLines(rec)"
+                          :key="lidx"
+                          class="wechat-chat-history-line"
+                        >
+                          {{ line }}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="wechat-chat-history-bottom">
+                      <span>聊天记录</span>
+                    </div>
+                  </div>
+
+                  <!-- 链接卡片 -->
+                  <div
+                    v-else-if="rec.renderType === 'link'"
+                    class="wechat-link-card wechat-special-card msg-radius cursor-pointer"
+                    @click.stop="openChatHistoryLinkWindow(rec)"
+                    @contextmenu="openMediaContextMenu($event, rec, 'message')"
+                  >
+                    <div class="wechat-link-content">
+                      <div class="wechat-link-info">
+                        <div class="wechat-link-title">{{ rec.title || rec.content || rec.url || '链接' }}</div>
+                        <div v-if="rec.content" class="wechat-link-desc">{{ rec.content }}</div>
+                      </div>
+                      <div v-if="rec.preview" class="wechat-link-thumb">
+                        <img :src="rec.preview" :alt="rec.title || '链接预览'" class="wechat-link-thumb-img" referrerpolicy="no-referrer" loading="lazy" decoding="async" @error="onChatHistoryLinkPreviewError(rec)" />
+                      </div>
+                    </div>
+                    <div class="wechat-link-from">
+                      <div class="wechat-link-from-avatar" :style="rec._fromAvatarImgOk ? { background: '#fff', color: 'transparent' } : null" aria-hidden="true">
+                        <span v-if="(!rec.fromAvatar) || (!rec._fromAvatarImgOk)">{{ getChatHistoryLinkFromAvatarText(rec) || '\u200B' }}</span>
+                        <img
+                          v-if="rec.fromAvatar && !rec._fromAvatarImgError"
+                          :src="rec.fromAvatar"
+                          alt=""
+                          class="wechat-link-from-avatar-img"
+                          referrerpolicy="no-referrer"
+                          loading="lazy"
+                          decoding="async"
+                          @load="onChatHistoryFromAvatarLoad(rec)"
+                          @error="onChatHistoryFromAvatarError(rec)"
+                        />
+                      </div>
+                      <div class="wechat-link-from-name">{{ getChatHistoryLinkFromText(rec) || '\u200B' }}</div>
+                    </div>
+                  </div>
+
                   <!-- 视频 -->
                   <div
-                    v-if="rec.renderType === 'video'"
+                    v-else-if="rec.renderType === 'video'"
                     class="msg-radius overflow-hidden relative bg-black/5 inline-block"
                     @contextmenu="openMediaContextMenu($event, rec, 'video')"
                   >
@@ -1351,7 +1922,7 @@
 
     <div
       v-if="contextMenu.visible"
-      class="fixed z-50 bg-white border border-gray-200 rounded-md shadow-lg text-sm"
+      class="fixed z-[12000] bg-white border border-gray-200 rounded-md shadow-lg text-sm"
       :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
       @click.stop
     >
@@ -1386,10 +1957,156 @@
       >
         打开文件夹
       </button>
+
+      <div class="border-t border-gray-200"></div>
+
+      <button
+        v-if="contextMenu.message?.id"
+        class="block w-full text-left px-3 py-2 hover:bg-gray-100"
+        type="button"
+        @click="onEditMessageClick"
+      >
+        {{ isLikelyTextMessage(contextMenu.message) ? '修改消息' : '编辑源码' }}
+      </button>
+      <button
+        v-if="contextMenu.message?.id"
+        class="block w-full text-left px-3 py-2 hover:bg-gray-100"
+        type="button"
+        @click="onEditMessageFieldsClick"
+      >
+        字段编辑
+      </button>
+      <button
+        v-if="contextMenu.editStatus?.modified"
+        class="block w-full text-left px-3 py-2 hover:bg-gray-100 text-red-600"
+        type="button"
+        @click="onResetEditedMessageClick"
+      >
+        恢复原消息
+      </button>
+      <button
+        v-if="contextMenu.message?.id"
+        class="block w-full text-left px-3 py-2 hover:bg-gray-100"
+        type="button"
+        @click="onRepairMessageSenderAsMeClick"
+      >
+        修复为我发送
+      </button>
+      <button
+        v-if="contextMenu.message?.id"
+        class="block w-full text-left px-3 py-2 hover:bg-gray-100 text-orange-600"
+        type="button"
+        @click="onFlipWechatMessageDirectionClick"
+      >
+        反转微信气泡位置
+      </button>
+      <div v-if="contextMenu.editStatusLoading" class="px-3 py-2 text-xs text-gray-400">检查修改状态…</div>
+    </div>
+
+    <!-- 修改消息弹窗 -->
+    <div v-if="messageEditModal.open" class="fixed inset-0 z-[11000] flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/40" @click="closeMessageEditModal"></div>
+      <div class="relative w-[860px] max-w-[95vw] bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-200 flex items-center">
+          <div class="text-base font-medium text-gray-900">{{ messageEditModal.mode === 'content' ? '修改消息' : '编辑源码' }}</div>
+          <button class="ml-auto text-gray-400 hover:text-gray-600" type="button" @click="closeMessageEditModal">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="p-5 max-h-[75vh] overflow-y-auto space-y-3">
+          <div v-if="messageEditModal.error" class="text-sm text-red-600 whitespace-pre-wrap">{{ messageEditModal.error }}</div>
+          <div v-if="messageEditModal.loading" class="text-sm text-gray-500">加载中…</div>
+
+          <textarea
+            v-model="messageEditModal.draft"
+            class="w-full min-h-[240px] rounded-md border border-gray-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#03C160]/20"
+            :disabled="messageEditModal.loading || messageEditModal.saving"
+            :placeholder="messageEditModal.mode === 'content' ? '请输入新的消息内容' : '请输入新的 message_content（可输入 0x... 写入 BLOB）'"
+          ></textarea>
+
+          <details v-if="messageEditModal.rawRow" class="text-xs">
+            <summary class="cursor-pointer select-none text-gray-700 hover:text-gray-900">查看源消息（raw）</summary>
+            <div class="mt-2 rounded border border-gray-200 bg-gray-50 p-2 overflow-auto">
+              <pre class="text-[11px] leading-snug whitespace-pre-wrap break-words">{{ prettyJson(messageEditModal.rawRow) }}</pre>
+            </div>
+          </details>
+        </div>
+
+        <div class="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+          <button class="text-sm px-4 py-2 rounded border border-gray-200 hover:bg-gray-50" type="button" @click="closeMessageEditModal">取消</button>
+          <button
+            class="text-sm px-4 py-2 rounded bg-[#03C160] text-white hover:bg-[#02ad55]"
+            type="button"
+            :disabled="messageEditModal.loading || messageEditModal.saving"
+            :class="messageEditModal.loading || messageEditModal.saving ? 'opacity-60 cursor-not-allowed' : ''"
+            @click="saveMessageEditModal"
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 字段编辑弹窗 -->
+    <div v-if="messageFieldsModal.open" class="fixed inset-0 z-[11000] flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/40" @click="closeMessageFieldsModal"></div>
+      <div class="relative w-[920px] max-w-[95vw] bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-200 flex items-center">
+          <div class="text-base font-medium text-gray-900">字段编辑</div>
+          <button class="ml-auto text-gray-400 hover:text-gray-600" type="button" @click="closeMessageFieldsModal">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="p-5 max-h-[75vh] overflow-y-auto space-y-3">
+          <div v-if="messageFieldsModal.error" class="text-sm text-red-600 whitespace-pre-wrap">{{ messageFieldsModal.error }}</div>
+          <div v-if="messageFieldsModal.loading" class="text-sm text-gray-500">加载中…</div>
+
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input v-model="messageFieldsModal.unsafe" type="checkbox" class="rounded border-gray-300" />
+              <span>我已知风险（允许修改 local_id / WCDB_CT / BLOB 等）</span>
+            </label>
+            <div class="text-xs text-gray-500">修改时间/类型会自动同步 message_resource 关键字段</div>
+          </div>
+
+          <textarea
+            v-model="messageFieldsModal.editsJson"
+            class="w-full min-h-[320px] rounded-md border border-gray-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#03C160]/20"
+            :disabled="messageFieldsModal.loading || messageFieldsModal.saving"
+            placeholder='{ "message_content": "...", "create_time": 123 }'
+          ></textarea>
+
+          <details v-if="messageFieldsModal.rawRow" class="text-xs">
+            <summary class="cursor-pointer select-none text-gray-700 hover:text-gray-900">查看源消息（raw）</summary>
+            <div class="mt-2 rounded border border-gray-200 bg-gray-50 p-2 overflow-auto">
+              <pre class="text-[11px] leading-snug whitespace-pre-wrap break-words">{{ prettyJson(messageFieldsModal.rawRow) }}</pre>
+            </div>
+          </details>
+        </div>
+
+        <div class="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+          <button class="text-sm px-4 py-2 rounded border border-gray-200 hover:bg-gray-50" type="button" @click="closeMessageFieldsModal">取消</button>
+          <button
+            class="text-sm px-4 py-2 rounded bg-[#03C160] text-white hover:bg-[#02ad55]"
+            type="button"
+            :disabled="messageFieldsModal.loading || messageFieldsModal.saving"
+            :class="messageFieldsModal.loading || messageFieldsModal.saving ? 'opacity-60 cursor-not-allowed' : ''"
+            @click="saveMessageFieldsModal"
+          >
+            保存
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 导出弹窗 -->
-    <div v-if="exportModalOpen" class="fixed inset-0 z-50 flex items-center justify-center">
+    <div v-if="exportModalOpen" class="fixed inset-0 z-[11000] flex items-center justify-center">
       <div class="absolute inset-0 bg-black/40" @click="closeExportModal"></div>
       <div class="relative w-[960px] max-w-[95vw] bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden">
         <div class="px-5 py-4 border-b border-gray-200 flex items-center">
@@ -1434,6 +2151,10 @@
                     <input type="radio" value="txt" v-model="exportFormat" class="hidden" />
                     <span>TXT</span>
                   </label>
+                  <label class="flex items-center gap-1.5 px-3 py-1.5 rounded-md border cursor-pointer transition-colors" :class="exportFormat === 'html' ? 'bg-[#03C160] text-white border-[#03C160]' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'">
+                    <input type="radio" value="html" v-model="exportFormat" class="hidden" />
+                    <span>HTML</span>
+                  </label>
                 </div>
               </div>
 
@@ -1451,6 +2172,31 @@
                     type="datetime-local"
                     class="px-2.5 py-1.5 text-sm rounded-md border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[#03C160]/30"
                   />
+                </div>
+              </div>
+            </div>
+
+            <div v-if="exportFormat === 'html'" class="mt-3">
+              <div class="text-sm font-medium text-gray-800 mb-2">HTML 选项</div>
+              <div class="p-3 bg-gray-50 rounded-md border border-gray-200">
+                <label class="flex items-start gap-2 text-sm text-gray-700">
+                  <input type="checkbox" v-model="exportDownloadRemoteMedia" :disabled="privacyMode" />
+                  <span>允许联网下载链接/引用缩略图（提高离线完整性）</span>
+                </label>
+                <div class="mt-1 text-xs text-gray-500">
+                  仅 HTML 生效；会在导出时尝试下载远程缩略图并写入 ZIP（已做安全限制）。隐私模式下自动忽略。
+                </div>
+
+                <div class="mt-3 flex flex-wrap items-center gap-3">
+                  <div class="text-sm text-gray-700">每页消息数</div>
+                  <input
+                    v-model.number="exportHtmlPageSize"
+                    type="number"
+                    min="0"
+                    step="100"
+                    class="w-32 px-2.5 py-1.5 text-sm rounded-md border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[#03C160]/30"
+                  />
+                  <div class="text-xs text-gray-500">推荐 1000；0=单文件（打开大聊天可能很卡）</div>
                 </div>
               </div>
             </div>
@@ -1700,108 +2446,12 @@
     </div>
   </div>
 
-  <!-- 桌面端设置弹窗 -->
-  <div
-    v-if="desktopSettingsOpen"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-    @click.self="closeDesktopSettings"
-  >
-    <div class="w-full max-w-md bg-white rounded-lg shadow-lg">
-      <div class="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
-        <div class="text-base font-medium text-gray-900">设置</div>
-        <button
-          type="button"
-          class="text-gray-500 hover:text-gray-700"
-          @click="closeDesktopSettings"
-          title="关闭"
-        >
-          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-
-      <div class="px-5 py-4 space-y-4">
-        <div class="flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-gray-900">开机自启动</div>
-            <div class="text-xs text-gray-500">系统登录后自动启动桌面端</div>
-          </div>
-          <input
-            type="checkbox"
-            class="h-4 w-4"
-            :checked="desktopAutoLaunch"
-            :disabled="desktopAutoLaunchLoading"
-            @change="onDesktopAutoLaunchToggle"
-          />
-        </div>
-        <div v-if="desktopAutoLaunchError" class="text-xs text-red-600 whitespace-pre-wrap">
-          {{ desktopAutoLaunchError }}
-        </div>
-
-        <div class="flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-gray-900">关闭窗口行为</div>
-            <div class="text-xs text-gray-500">点击关闭按钮时：默认最小化到托盘</div>
-          </div>
-          <select
-            class="text-sm px-2 py-1 rounded-md border border-gray-200"
-            :disabled="desktopCloseBehaviorLoading"
-            :value="desktopCloseBehavior"
-            @change="onDesktopCloseBehaviorChange"
-          >
-            <option value="tray">最小化到托盘</option>
-            <option value="exit">直接退出</option>
-          </select>
-        </div>
-        <div v-if="desktopCloseBehaviorError" class="text-xs text-red-600 whitespace-pre-wrap">
-          {{ desktopCloseBehaviorError }}
-        </div>
-
-        <div class="flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-gray-900">启动后自动开启实时获取</div>
-            <div class="text-xs text-gray-500">进入聊天页后自动打开“实时开关”（默认关闭）</div>
-          </div>
-          <input
-            type="checkbox"
-            class="h-4 w-4"
-            :checked="desktopAutoRealtime"
-            @change="onDesktopAutoRealtimeToggle"
-          />
-        </div>
-
-        <div class="flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-gray-900">有数据时默认进入聊天页</div>
-            <div class="text-xs text-gray-500">有已解密账号时，打开应用默认跳转到 /chat（默认关闭）</div>
-          </div>
-          <input
-            type="checkbox"
-            class="h-4 w-4"
-            :checked="desktopDefaultToChatWhenData"
-            @change="onDesktopDefaultToChatToggle"
-          />
-        </div>
-      </div>
-
-      <div class="px-5 py-4 border-t border-gray-200 flex items-center justify-end gap-2">
-        <button
-          type="button"
-          class="text-sm px-3 py-2 rounded-md bg-white border border-gray-200 hover:bg-gray-50"
-          @click="closeDesktopSettings"
-        >
-          关闭
-        </button>
-      </div>
-    </div>
-  </div>
-
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineComponent, h, toRaw } from 'vue'
+import { storeToRefs } from 'pinia'
 
 definePageMeta({
   key: 'chat'
@@ -1809,6 +2459,11 @@ definePageMeta({
 
 import { useApi } from '~/composables/useApi'
 import { parseTextWithEmoji } from '~/utils/wechat-emojis'
+import { DESKTOP_SETTING_AUTO_REALTIME_KEY, readLocalBoolSetting } from '~/utils/desktop-settings'
+import { heatColor } from '~/utils/wrapped/heatmap'
+import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { useChatRealtimeStore } from '~/stores/chatRealtime'
+import { usePrivacyStore } from '~/stores/privacy'
 import wechatPcLogoUrl from '~/assets/images/wechat/WeChat-Icon-Logo.wine.svg'
 import zipIconUrl from '~/assets/images/wechat/zip.png'
 import pdfIconUrl from '~/assets/images/wechat/pdf.png'
@@ -1845,9 +2500,6 @@ useHead({
 })
 
 const route = useRoute()
-const isSnsRoute = computed(() => route.path?.startsWith('/sns'))
-const isContactsRoute = computed(() => route.path?.startsWith('/contacts'))
-const isWrappedRoute = computed(() => route.path?.startsWith('/wrapped'))
 
 const routeUsername = computed(() => {
   const raw = route.params.username
@@ -1868,25 +2520,9 @@ const contactProfileData = ref(null)
 let contactProfileHoverHideTimer = null
 
 // 隐私模式
-const privacyMode = ref(false)
-const PRIVACY_MODE_KEY = 'ui.privacy_mode'
-
-onMounted(() => {
-  if (!process.client) return
-  try {
-    privacyMode.value = localStorage.getItem(PRIVACY_MODE_KEY) === '1'
-  } catch {}
-})
-
-watch(
-  () => privacyMode.value,
-  (v) => {
-    if (!process.client) return
-    try {
-      localStorage.setItem(PRIVACY_MODE_KEY, v ? '1' : '0')
-    } catch {}
-  }
-)
+const privacyStore = usePrivacyStore()
+privacyStore.init()
+const { privacyMode } = storeToRefs(privacyStore)
 
 // 会话列表（中间栏）宽度（按物理像素 px 配置）：默认 295px，支持拖动调整并持久化
 const SESSION_LIST_WIDTH_KEY = 'ui.chat.session_list_width_physical'
@@ -2013,141 +2649,12 @@ onMounted(() => {
 
 // 桌面端设置（仅 Electron 环境可见）
 const isDesktopEnv = ref(false)
-const desktopSettingsOpen = ref(false)
-
-const DESKTOP_SETTING_AUTO_REALTIME_KEY = 'desktop.settings.autoRealtime'
-const DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY = 'desktop.settings.defaultToChatWhenData'
 
 const desktopAutoRealtime = ref(false)
-const desktopDefaultToChatWhenData = ref(false)
-
-const desktopAutoLaunch = ref(false)
-const desktopAutoLaunchLoading = ref(false)
-const desktopAutoLaunchError = ref('')
-
-const desktopCloseBehavior = ref('tray') // tray | exit
-const desktopCloseBehaviorLoading = ref(false)
-const desktopCloseBehaviorError = ref('')
-
-const readLocalBool = (key) => {
-  if (!process.client) return false
-  try {
-    return localStorage.getItem(key) === 'true'
-  } catch {
-    return false
-  }
-}
-
-const writeLocalBool = (key, value) => {
-  if (!process.client) return
-  try {
-    localStorage.setItem(key, value ? 'true' : 'false')
-  } catch {}
-}
 
 // 尽量早读本地设置，避免首次加载联系人时拿不到 autoRealtime 选项
 if (process.client) {
-  desktopAutoRealtime.value = readLocalBool(DESKTOP_SETTING_AUTO_REALTIME_KEY)
-  desktopDefaultToChatWhenData.value = readLocalBool(DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY)
-}
-
-const refreshDesktopAutoLaunch = async () => {
-  if (!process.client || typeof window === 'undefined') return
-  if (!window.wechatDesktop?.getAutoLaunch) return
-  desktopAutoLaunchLoading.value = true
-  desktopAutoLaunchError.value = ''
-  try {
-    desktopAutoLaunch.value = !!(await window.wechatDesktop.getAutoLaunch())
-  } catch (e) {
-    desktopAutoLaunchError.value = e?.message || '读取开机自启动状态失败'
-  } finally {
-    desktopAutoLaunchLoading.value = false
-  }
-}
-
-const setDesktopAutoLaunch = async (enabled) => {
-  if (!process.client || typeof window === 'undefined') return
-  if (!window.wechatDesktop?.setAutoLaunch) return
-  desktopAutoLaunchLoading.value = true
-  desktopAutoLaunchError.value = ''
-  try {
-    desktopAutoLaunch.value = !!(await window.wechatDesktop.setAutoLaunch(!!enabled))
-  } catch (e) {
-    desktopAutoLaunchError.value = e?.message || '设置开机自启动失败'
-    await refreshDesktopAutoLaunch()
-  } finally {
-    desktopAutoLaunchLoading.value = false
-  }
-}
-
-const refreshDesktopCloseBehavior = async () => {
-  if (!process.client || typeof window === 'undefined') return
-  if (!window.wechatDesktop?.getCloseBehavior) return
-  desktopCloseBehaviorLoading.value = true
-  desktopCloseBehaviorError.value = ''
-  try {
-    const v = await window.wechatDesktop.getCloseBehavior()
-    desktopCloseBehavior.value = (String(v || '').toLowerCase() === 'exit') ? 'exit' : 'tray'
-  } catch (e) {
-    desktopCloseBehaviorError.value = e?.message || '读取关闭窗口行为失败'
-  } finally {
-    desktopCloseBehaviorLoading.value = false
-  }
-}
-
-const setDesktopCloseBehavior = async (behavior) => {
-  if (!process.client || typeof window === 'undefined') return
-  if (!window.wechatDesktop?.setCloseBehavior) return
-  const desired = (String(behavior || '').toLowerCase() === 'exit') ? 'exit' : 'tray'
-  desktopCloseBehaviorLoading.value = true
-  desktopCloseBehaviorError.value = ''
-  try {
-    const v = await window.wechatDesktop.setCloseBehavior(desired)
-    desktopCloseBehavior.value = (String(v || '').toLowerCase() === 'exit') ? 'exit' : 'tray'
-  } catch (e) {
-    desktopCloseBehaviorError.value = e?.message || '设置关闭窗口行为失败'
-    await refreshDesktopCloseBehavior()
-  } finally {
-    desktopCloseBehaviorLoading.value = false
-  }
-}
-
-const openDesktopSettings = async () => {
-  desktopSettingsOpen.value = true
-  await refreshDesktopAutoLaunch()
-  await refreshDesktopCloseBehavior()
-}
-
-const closeDesktopSettings = () => {
-  desktopSettingsOpen.value = false
-}
-
-const onDesktopAutoLaunchToggle = async (ev) => {
-  const checked = !!ev?.target?.checked
-  await setDesktopAutoLaunch(checked)
-}
-
-const onDesktopCloseBehaviorChange = async (ev) => {
-  const v = String(ev?.target?.value || '').trim()
-  await setDesktopCloseBehavior(v)
-}
-
-const onDesktopAutoRealtimeToggle = async (ev) => {
-  const checked = !!ev?.target?.checked
-  desktopAutoRealtime.value = checked
-  writeLocalBool(DESKTOP_SETTING_AUTO_REALTIME_KEY, checked)
-  if (checked) {
-    // 开启后尝试立即启用实时模式（不可用则静默忽略）
-    try {
-      await tryEnableRealtimeAuto()
-    } catch {}
-  }
-}
-
-const onDesktopDefaultToChatToggle = (ev) => {
-  const checked = !!ev?.target?.checked
-  desktopDefaultToChatWhenData.value = checked
-  writeLocalBool(DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, checked)
+  desktopAutoRealtime.value = readLocalBoolSetting(DESKTOP_SETTING_AUTO_REALTIME_KEY, false)
 }
 
 // 联系人数据
@@ -2157,45 +2664,22 @@ const searchQuery = ref('')
 
 const isLoadingContacts = ref(false)
 const contactsError = ref('')
-const selectedAccount = ref(null)
+const chatAccounts = useChatAccountsStore()
+const { selectedAccount, accounts: availableAccounts } = storeToRefs(chatAccounts)
 
-const availableAccounts = ref([])
+// Realtime is a global switch (SidebarRail) and only affects the selected account.
+const realtimeStore = useChatRealtimeStore()
+const {
+  enabled: realtimeEnabled,
+  toggleSeq: realtimeToggleSeq,
+  lastToggleAction: realtimeLastToggleAction,
+  changeSeq: realtimeChangeSeq,
+} = storeToRefs(realtimeStore)
 
-const sidebarMediaBase = process.client ? 'http://localhost:8000' : ''
-
-const selfAvatarUrl = computed(() => {
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return ''
-  return `${sidebarMediaBase}/api/chat/avatar?account=${encodeURIComponent(acc)}&username=${encodeURIComponent(acc)}`
-})
-
-const goSns = async () => {
-  await navigateTo('/sns')
-}
-
-const goContacts = async () => {
-  await navigateTo('/contacts')
-}
-
-const goWrapped = async () => {
-  await navigateTo('/wrapped')
-}
-
-// 实时更新（WCDB DLL + db_storage watcher）
-const realtimeEnabled = ref(false)
-const realtimeAvailable = ref(false)
-const realtimeChecking = ref(false)
-const realtimeStatusInfo = ref(null)
-const realtimeStatusError = ref('')
-let realtimeEventSource = null
 let realtimeRefreshFuture = null
 let realtimeRefreshQueued = false
 let realtimeSessionsRefreshFuture = null
 let realtimeSessionsRefreshQueued = false
-let realtimeFullSyncFuture = null
-let realtimeFullSyncQueued = false
-let realtimeFullSyncPriority = ''
-let realtimeChangeDebounceTimer = null
 
 const allMessages = ref({})
 
@@ -2212,6 +2696,7 @@ const messageTypeFilterOptions = [
   { value: 'emoji', label: '表情' },
   { value: 'video', label: '视频' },
   { value: 'voice', label: '语音' },
+  { value: 'chatHistory', label: '聊天记录' },
   { value: 'transfer', label: '转账' },
   { value: 'redPacket', label: '红包' },
   { value: 'file', label: '文件' },
@@ -2671,17 +3156,160 @@ const getMessageSearchHitAvatarInitial = (hit) => {
 // 搜索定位上下文（避免破坏正常分页）
 const searchContext = ref({
   active: false,
+  kind: 'search', // search | date | first
+  label: '',
   username: '',
   anchorId: '',
   anchorIndex: -1,
+  hasMoreBefore: false,
+  hasMoreAfter: false,
+  loadingBefore: false,
+  loadingAfter: false,
   savedMessages: null,
   savedMeta: null
 })
 const highlightMessageId = ref('')
 let highlightMessageTimer = null
 
+const searchContextBannerText = computed(() => {
+  if (!searchContext.value?.active) return ''
+  const kind = String(searchContext.value.kind || 'search')
+  if (kind === 'date') {
+    const label = String(searchContext.value.label || '').trim()
+    return label ? `已定位到 ${label}（上下文模式）` : '已定位到指定日期（上下文模式）'
+  }
+  if (kind === 'first') {
+    return '已定位到会话顶部（上下文模式）'
+  }
+  return '已定位到搜索结果（上下文模式）'
+})
+
 // 回到最新按钮
 const showJumpToBottom = ref(false)
+
+// 时间侧边栏（按日期定位）
+const timeSidebarOpen = ref(false)
+const timeSidebarYear = ref(null)
+const timeSidebarMonth = ref(null) // 1-12
+const timeSidebarCounts = ref({}) // { 'YYYY-MM-DD': count }
+const timeSidebarMax = ref(0)
+const timeSidebarTotal = ref(0)
+const timeSidebarLoading = ref(false)
+const timeSidebarError = ref('')
+const timeSidebarSelectedDate = ref('') // YYYY-MM-DD (current/selected day)
+// Simple in-memory cache per (account|username|YYYY-MM)
+const timeSidebarCache = ref({})
+const timeSidebarWeekdays = ['一', '二', '三', '四', '五', '六', '日']
+
+const timeSidebarMonthLabel = computed(() => {
+  const y = Number(timeSidebarYear.value || 0)
+  const m = Number(timeSidebarMonth.value || 0)
+  if (!y || !m) return ''
+  return `${y}年${m}月`
+})
+
+const timeSidebarYearOptions = computed(() => {
+  // WeChat history normally starts after 2011, but keep a broader range for safety.
+  const nowY = new Date().getFullYear()
+  const minY = 2000
+  const maxY = Math.max(nowY, Number(timeSidebarYear.value || 0) || nowY)
+  const years = []
+  for (let y = maxY; y >= minY; y--) years.push(y)
+  return years
+})
+
+const timeSidebarActiveDays = computed(() => {
+  const counts = timeSidebarCounts.value || {}
+  const keys = Object.keys(counts)
+  return keys.length
+})
+
+const _pad2 = (n) => String(n).padStart(2, '0')
+
+const _dateStrFromEpochSeconds = (ts) => {
+  const t = Number(ts || 0)
+  if (!t) return ''
+  try {
+    const d = new Date(t * 1000)
+    return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`
+  } catch {
+    return ''
+  }
+}
+
+// Calendar heatmap color: reuse Wrapped heat palette, but bucket to Wrapped-like legend levels
+// so ">=1 message" is always visibly tinted (instead of being almost white when max is huge).
+const _calendarHeatColor = (count, maxV) => {
+  const v = Math.max(0, Number(count || 0))
+  const m = Math.max(0, Number(maxV || 0))
+  if (!(v > 0)) return ''
+  if (!(m > 0)) return heatColor(1, 1)
+  const levels = 6
+  const ratio = Math.max(0, Math.min(1, v / m))
+  const level = Math.min(levels, Math.max(1, Math.ceil(ratio * levels)))
+  const valueForLevel = Math.max(1, Math.round(level * (m / levels)))
+  return heatColor(valueForLevel, m)
+}
+
+const timeSidebarCalendarCells = computed(() => {
+  const y = Number(timeSidebarYear.value || 0)
+  const m = Number(timeSidebarMonth.value || 0) // 1-12
+  if (!y || !m) return []
+
+  const daysInMonth = new Date(y, m, 0).getDate()
+  const firstDow = new Date(y, m - 1, 1).getDay() // 0=Sun..6=Sat
+  const offset = (firstDow + 6) % 7 // Monday=0
+
+  const maxV = Math.max(0, Number(timeSidebarMax.value || 0))
+  const counts = timeSidebarCounts.value || {}
+  const selected = String(timeSidebarSelectedDate.value || '').trim()
+
+  const out = []
+  for (let i = 0; i < 42; i++) {
+    const dayNum = i - offset + 1
+    const inMonth = dayNum >= 1 && dayNum <= daysInMonth
+    if (!inMonth) {
+      out.push({
+        key: `e:${y}-${m}:${i}`,
+        day: '',
+        dateStr: '',
+        count: 0,
+        disabled: true,
+        className: 'calendar-day-outside',
+        style: null,
+        title: ''
+      })
+      continue
+    }
+
+    const dateStr = `${y}-${_pad2(m)}-${_pad2(dayNum)}`
+    const count = Math.max(0, Number(counts[dateStr] || 0))
+    const disabled = count <= 0
+
+    const style = !disabled
+      ? { backgroundColor: _calendarHeatColor(count, Math.max(maxV, count)) }
+      : null
+
+    const className = [
+      disabled ? 'calendar-day-empty' : '',
+      (selected && dateStr === selected) ? 'calendar-day-selected' : ''
+    ].filter(Boolean).join(' ')
+
+    out.push({
+      key: dateStr,
+      day: String(dayNum),
+      dateStr,
+      count,
+      disabled,
+      // NOTE: heatmap bg color is applied via inline style (reusing Wrapped heatmap palette).
+      // Dynamic class names like `calendar-day-l${level}` may be purged by Tailwind and lead to no bg color.
+      className,
+      style,
+      title: `${dateStr}：${count} 条`
+    })
+  }
+  return out
+})
 
 // 导出（离线 zip）
 const exportModalOpen = ref(false)
@@ -2690,13 +3318,16 @@ const exportError = ref('')
 
 // current: 当前会话（映射为 selected + 单个 username）
 const exportScope = ref('current') // current | selected | all | groups | singles
-const exportFormat = ref('json') // json | txt
+const exportFormat = ref('json') // json | txt | html
+const exportDownloadRemoteMedia = ref(true)
+const exportHtmlPageSize = ref(1000) // <=0 means single-file HTML (may be slow for huge chats)
 const exportMessageTypeOptions = [
   { value: 'text', label: '文本' },
   { value: 'image', label: '图片' },
   { value: 'emoji', label: '表情' },
   { value: 'video', label: '视频' },
   { value: 'voice', label: '语音' },
+  { value: 'chatHistory', label: '聊天记录' },
   { value: 'transfer', label: '转账' },
   { value: 'redPacket', label: '红包' },
   { value: 'file', label: '文件' },
@@ -2790,12 +3421,27 @@ const contactProfileResolvedAlias = computed(() => {
   return String(contactProfileData.value?.alias || '').trim()
 })
 
+const contactProfileResolvedGender = computed(() => {
+  const value = contactProfileData.value?.gender
+  if (value == null || value === '') return ''
+  const n = Number(value)
+  if (!Number.isFinite(n)) return ''
+  if (n === 1) return '男'
+  if (n === 2) return '女'
+  if (n === 0) return '未知'
+  return String(n)
+})
+
 const contactProfileResolvedRegion = computed(() => {
   return String(contactProfileData.value?.region || '').trim()
 })
 
 const contactProfileResolvedRemark = computed(() => {
   return String(contactProfileData.value?.remark || '').trim()
+})
+
+const contactProfileResolvedSignature = computed(() => {
+  return String(contactProfileData.value?.signature || '').trim()
 })
 
 const contactProfileResolvedSource = computed(() => {
@@ -3082,8 +3728,10 @@ const fetchContactProfile = async (options = {}) => {
         avatar: avatarFallback || selectedContact.value?.avatar || '',
         nickname: '',
         alias: '',
+        gender: null,
         region: '',
         remark: '',
+        signature: '',
         source: '',
         sourceScene: null,
       }
@@ -3095,8 +3743,10 @@ const fetchContactProfile = async (options = {}) => {
       avatar: avatarFallback || selectedContact.value?.avatar || '',
       nickname: '',
       alias: '',
+      gender: null,
       region: '',
       remark: '',
+      signature: '',
       source: '',
       sourceScene: null,
     }
@@ -3135,8 +3785,10 @@ const onMessageAvatarMouseEnter = async (message) => {
       avatar: senderAvatar,
       nickname: '',
       alias: '',
+      gender: null,
       region: '',
       remark: '',
+      signature: '',
       source: '',
       sourceScene: null,
     }
@@ -3166,11 +3818,6 @@ const onContactCardMouseEnter = () => {
   clearContactProfileHoverHideTimer()
 }
 
-const toggleRealtimeFromSidebar = async () => {
-  if (realtimeChecking.value) return
-  await toggleRealtime()
-}
-
 watch(exportModalOpen, (open) => {
   if (!process.client) return
   if (!open) {
@@ -3192,6 +3839,28 @@ watch(
     closeContactProfileCard()
     contactProfileError.value = ''
     contactProfileData.value = null
+  }
+)
+
+watch(
+  () => selectedContact.value?.username,
+  async () => {
+    if (!timeSidebarOpen.value) return
+    // When switching conversations with the time sidebar open, re-initialize month and refetch counts.
+    const { year, month } = _pickTimeSidebarInitialYearMonth()
+    timeSidebarYear.value = year
+    timeSidebarMonth.value = month
+
+     const list = messages.value || []
+     const last = Array.isArray(list) && list.length ? list[list.length - 1] : null
+     const ds = _dateStrFromEpochSeconds(Number(last?.createTime || 0))
+     if (ds) {
+       await _applyTimeSidebarSelectedDate(ds, { syncMonth: false })
+     } else {
+       timeSidebarSelectedDate.value = ''
+     }
+
+    await loadTimeSidebarMonth({ year, month, force: false })
   }
 )
 
@@ -3270,6 +3939,15 @@ const startChatExport = async () => {
 
   const selectedTypeSet = new Set(messageTypes.map((t) => String(t || '').trim()))
   const mediaKindSet = new Set()
+  if (selectedTypeSet.has('chatHistory')) {
+    // 合并消息内部可能包含任意媒体类型；即使只勾选了 chatHistory，也需要打包媒体才可离线查看。
+    mediaKindSet.add('image')
+    mediaKindSet.add('emoji')
+    mediaKindSet.add('video')
+    mediaKindSet.add('video_thumb')
+    mediaKindSet.add('voice')
+    mediaKindSet.add('file')
+  }
   if (selectedTypeSet.has('image')) mediaKindSet.add('image')
   if (selectedTypeSet.has('emoji')) mediaKindSet.add('emoji')
   if (selectedTypeSet.has('video')) {
@@ -3298,6 +3976,8 @@ const startChatExport = async () => {
       message_types: messageTypes,
       include_media: includeMedia,
       media_kinds: mediaKinds,
+      download_remote_media: exportFormat.value === 'html' && !!exportDownloadRemoteMedia.value,
+      html_page_size: Math.max(0, Math.floor(Number(exportHtmlPageSize.value || 1000))),
       output_dir: isDesktopExportRuntime() ? String(exportFolder.value || '').trim() : null,
       privacy_mode: !!privacyMode.value,
       file_name: exportFileName.value || null
@@ -3463,14 +4143,46 @@ const isQuotedVoice = (message) => {
   return false
 }
 
+const isQuotedImage = (message) => {
+  const t = String(message?.quoteType || '').trim()
+  if (t === '3') return true
+  if (String(message?.quoteContent || '').trim() === '[图片]' && String(message?.quoteServerId || '').trim()) return true
+  return false
+}
+
+const isQuotedLink = (message) => {
+  const t = String(message?.quoteType || '').trim()
+  if (t === '49') return true
+  return /^\[链接\]\s*/.test(String(message?.quoteContent || '').trim())
+}
+
+const getQuotedLinkText = (message) => {
+  const raw = String(message?.quoteContent || '').trim()
+  if (!raw) return ''
+  const stripped = raw.replace(/^\[链接\]\s*/u, '').trim()
+  return stripped || raw
+}
+
+const onQuoteImageError = (message) => {
+  try {
+    if (message) message._quoteImageError = true
+  } catch {}
+}
+
+const onQuoteThumbError = (message) => {
+  try {
+    if (message) message._quoteThumbError = true
+  } catch {}
+}
+
 const playQuoteVoice = (message) => {
   playVoice({ id: getQuoteVoiceId(message) })
 }
 
-const contextMenu = ref({ visible: false, x: 0, y: 0, message: null, kind: '', disabled: false })
+const contextMenu = ref({ visible: false, x: 0, y: 0, message: null, kind: '', disabled: false, editStatus: null, editStatusLoading: false })
 
 const closeContextMenu = () => {
-  contextMenu.value = { visible: false, x: 0, y: 0, message: null, kind: '', disabled: false }
+  contextMenu.value = { visible: false, x: 0, y: 0, message: null, kind: '', disabled: false, editStatus: null, editStatusLoading: false }
 }
 
 const openMediaContextMenu = (e, message, kind) => {
@@ -3507,22 +4219,400 @@ const openMediaContextMenu = (e, message, kind) => {
     y: e.clientY,
     message,
     kind: actualKind,
-    disabled
+    disabled,
+    editStatus: null,
+    editStatusLoading: false
+  }
+
+  try {
+    const account = String(selectedAccount.value || '').trim()
+    const username = String(selectedContact.value?.username || '').trim()
+    const messageId = String(message?.id || '').trim()
+    if (account && username && messageId) {
+      contextMenu.value.editStatusLoading = true
+      void loadContextMenuEditStatus({ account, username, message_id: messageId })
+    }
+  } catch {}
+}
+
+const loadContextMenuEditStatus = async (params) => {
+  if (!process.client) return
+  const account = String(params?.account || '').trim()
+  const username = String(params?.username || '').trim()
+  const messageId = String(params?.message_id || '').trim()
+  if (!account || !username || !messageId) {
+    contextMenu.value.editStatusLoading = false
+    return
+  }
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatEditStatus({ account, username, message_id: messageId })
+    const cur = String(contextMenu.value?.message?.id || '').trim()
+    if (contextMenu.value.visible && cur === messageId) {
+      contextMenu.value.editStatus = resp || { modified: false }
+    }
+  } catch {
+    const cur = String(contextMenu.value?.message?.id || '').trim()
+    if (contextMenu.value.visible && cur === messageId) {
+      contextMenu.value.editStatus = null
+    }
+  } finally {
+    const cur = String(contextMenu.value?.message?.id || '').trim()
+    if (contextMenu.value.visible && cur === messageId) {
+      contextMenu.value.editStatusLoading = false
+    }
+  }
+}
+
+const prettyJson = (obj) => {
+  try {
+    return JSON.stringify(obj ?? null, null, 2)
+  } catch {
+    return String(obj ?? '')
+  }
+}
+
+const isLikelyTextMessage = (m) => {
+  if (!m) return false
+  const rt = String(m?.renderType || '').trim()
+  if (rt && rt !== 'text') return false
+  if (m?.imageUrl || m?.emojiUrl || m?.videoUrl || m?.voiceUrl) return false
+  return true
+}
+
+const messageEditModal = ref({
+  open: false,
+  loading: false,
+  saving: false,
+  error: '',
+  mode: 'content',
+  sessionId: '',
+  messageId: '',
+  draft: '',
+  rawRow: null,
+})
+
+const closeMessageEditModal = () => {
+  messageEditModal.value = {
+    open: false,
+    loading: false,
+    saving: false,
+    error: '',
+    mode: 'content',
+    sessionId: '',
+    messageId: '',
+    draft: '',
+    rawRow: null,
+  }
+}
+
+const openMessageEditModal = async ({ message, mode }) => {
+  if (!process.client) return
+  const account = String(selectedAccount.value || '').trim()
+  const sessionId = String(selectedContact.value?.username || '').trim()
+  const messageId = String(message?.id || '').trim()
+  if (!account || !sessionId || !messageId) return
+  const resolvedMode = mode === 'raw' ? 'raw' : 'content'
+  const initialDraft = resolvedMode === 'content'
+    ? (typeof message?.content === 'string' ? message.content : String(message?.content ?? ''))
+    : ''
+
+  messageEditModal.value = {
+    open: true,
+    loading: true,
+    saving: false,
+    error: '',
+    mode: resolvedMode,
+    sessionId,
+    messageId,
+    draft: initialDraft,
+    rawRow: null,
+  }
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessageRaw({ account, username: sessionId, message_id: messageId })
+    const row = resp?.row || null
+    const rawContent = row?.message_content
+    const rawDraft = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '')
+    const draft = resolvedMode === 'raw' ? rawDraft : messageEditModal.value.draft
+    messageEditModal.value = { ...messageEditModal.value, loading: false, rawRow: row, draft }
+  } catch (e) {
+    messageEditModal.value = { ...messageEditModal.value, loading: false, error: e?.message || '加载失败' }
+  }
+}
+
+const saveMessageEditModal = async () => {
+  if (!process.client) return
+  if (messageEditModal.value.saving || messageEditModal.value.loading) return
+
+  const account = String(selectedAccount.value || '').trim()
+  if (!account) return
+
+  const sessionId = String(messageEditModal.value.sessionId || '').trim()
+  const messageId = String(messageEditModal.value.messageId || '').trim()
+  if (!sessionId || !messageId) return
+
+  messageEditModal.value = { ...messageEditModal.value, saving: true, error: '' }
+  try {
+    const api = useApi()
+    const resp = await api.editChatMessage({
+      account,
+      session_id: sessionId,
+      message_id: messageId,
+      edits: {
+        message_content: String(messageEditModal.value.draft ?? ''),
+      },
+      unsafe: false,
+    })
+
+    if (resp?.updated_message) {
+      try {
+        const u = normalizeMessage(resp.updated_message)
+        const uname = String(selectedContact.value?.username || '').trim()
+        const list = allMessages.value[uname] || []
+        const idx = list.findIndex((m) => String(m?.id || '') === String(u?.id || ''))
+        if (idx >= 0) {
+          const next = [...list]
+          next[idx] = u
+          allMessages.value = { ...allMessages.value, [uname]: next }
+        } else {
+          await refreshSelectedMessages()
+        }
+      } catch {
+        await refreshSelectedMessages()
+      }
+    } else {
+      await refreshSelectedMessages()
+    }
+
+    closeMessageEditModal()
+  } catch (e) {
+    messageEditModal.value = { ...messageEditModal.value, saving: false, error: e?.message || '保存失败' }
+    return
+  } finally {
+    messageEditModal.value = { ...messageEditModal.value, saving: false }
+  }
+}
+
+const messageFieldsModal = ref({
+  open: false,
+  loading: false,
+  saving: false,
+  error: '',
+  sessionId: '',
+  messageId: '',
+  unsafe: false,
+  editsJson: '',
+  rawRow: null,
+})
+
+const closeMessageFieldsModal = () => {
+  messageFieldsModal.value = {
+    open: false,
+    loading: false,
+    saving: false,
+    error: '',
+    sessionId: '',
+    messageId: '',
+    unsafe: false,
+    editsJson: '',
+    rawRow: null,
+  }
+}
+
+const openMessageFieldsModal = async (message) => {
+  if (!process.client) return
+  const account = String(selectedAccount.value || '').trim()
+  const sessionId = String(selectedContact.value?.username || '').trim()
+  const messageId = String(message?.id || '').trim()
+  if (!account || !sessionId || !messageId) return
+
+  messageFieldsModal.value = {
+    open: true,
+    loading: true,
+    saving: false,
+    error: '',
+    sessionId,
+    messageId,
+    unsafe: false,
+    editsJson: '',
+    rawRow: null,
+  }
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessageRaw({ account, username: sessionId, message_id: messageId })
+    const row = resp?.row || null
+    const seed = {}
+    for (const k of ['message_content', 'local_type', 'create_time', 'server_id', 'origin_source', 'source']) {
+      if (row && Object.prototype.hasOwnProperty.call(row, k)) seed[k] = row[k]
+    }
+    messageFieldsModal.value = {
+      ...messageFieldsModal.value,
+      loading: false,
+      rawRow: row,
+      editsJson: JSON.stringify(seed, null, 2),
+    }
+  } catch (e) {
+    messageFieldsModal.value = { ...messageFieldsModal.value, loading: false, error: e?.message || '加载失败' }
+  }
+}
+
+const saveMessageFieldsModal = async () => {
+  if (!process.client) return
+  if (messageFieldsModal.value.saving || messageFieldsModal.value.loading) return
+
+  const account = String(selectedAccount.value || '').trim()
+  if (!account) return
+
+  const sessionId = String(messageFieldsModal.value.sessionId || '').trim()
+  const messageId = String(messageFieldsModal.value.messageId || '').trim()
+  if (!sessionId || !messageId) return
+
+  let edits = null
+  try {
+    edits = JSON.parse(String(messageFieldsModal.value.editsJson || '').trim() || 'null')
+  } catch {
+    messageFieldsModal.value = { ...messageFieldsModal.value, error: 'JSON 格式错误' }
+    return
+  }
+  if (!edits || typeof edits !== 'object' || Array.isArray(edits)) {
+    messageFieldsModal.value = { ...messageFieldsModal.value, error: 'edits 必须是 JSON 对象' }
+    return
+  }
+  if (!Object.keys(edits).length) {
+    messageFieldsModal.value = { ...messageFieldsModal.value, error: 'edits 不能为空' }
+    return
+  }
+
+  messageFieldsModal.value = { ...messageFieldsModal.value, saving: true, error: '' }
+  try {
+    const api = useApi()
+    await api.editChatMessage({
+      account,
+      session_id: sessionId,
+      message_id: messageId,
+      edits,
+      unsafe: !!messageFieldsModal.value.unsafe,
+    })
+    await refreshSelectedMessages()
+    closeMessageFieldsModal()
+  } catch (e) {
+    messageFieldsModal.value = { ...messageFieldsModal.value, saving: false, error: e?.message || '保存失败' }
+    return
+  } finally {
+    messageFieldsModal.value = { ...messageFieldsModal.value, saving: false }
+  }
+}
+
+const onEditMessageClick = async () => {
+  if (!process.client) return
+  const m = contextMenu.value.message
+  if (!m) return
+  const mode = isLikelyTextMessage(m) ? 'content' : 'raw'
+  closeContextMenu()
+  await openMessageEditModal({ message: m, mode })
+}
+
+const onEditMessageFieldsClick = async () => {
+  if (!process.client) return
+  const m = contextMenu.value.message
+  if (!m) return
+  closeContextMenu()
+  await openMessageFieldsModal(m)
+}
+
+const onResetEditedMessageClick = async () => {
+  if (!process.client) return
+  const m = contextMenu.value.message
+  if (!m) return
+  const account = String(selectedAccount.value || '').trim()
+  const sessionId = String(selectedContact.value?.username || '').trim()
+  const messageId = String(m?.id || '').trim()
+  if (!account || !sessionId || !messageId) return
+
+  const ok = window.confirm('确认恢复该条消息到首次快照吗？')
+  if (!ok) return
+
+  try {
+    const api = useApi()
+    await api.resetChatEditedMessage({ account, session_id: sessionId, message_id: messageId })
+    closeContextMenu()
+    await refreshSelectedMessages()
+  } catch (e) {
+    window.alert(e?.message || '恢复失败')
+  } finally {
+    closeContextMenu()
+  }
+}
+
+const onRepairMessageSenderAsMeClick = async () => {
+  if (!process.client) return
+  const m = contextMenu.value.message
+  if (!m) return
+  const account = String(selectedAccount.value || '').trim()
+  const sessionId = String(selectedContact.value?.username || '').trim()
+  const messageId = String(m?.id || '').trim()
+  if (!account || !sessionId || !messageId) return
+
+  const ok = window.confirm('确认将该消息修复为“我发送”吗？这会修改 real_sender_id 字段。')
+  if (!ok) return
+
+  try {
+    const api = useApi()
+    await api.repairChatMessageSender({ account, session_id: sessionId, message_id: messageId, mode: 'me' })
+    closeContextMenu()
+    await refreshSelectedMessages()
+  } catch (e) {
+    window.alert(e?.message || '修复失败')
+  } finally {
+    closeContextMenu()
+  }
+}
+
+const onFlipWechatMessageDirectionClick = async () => {
+  if (!process.client) return
+  const m = contextMenu.value.message
+  if (!m) return
+  const account = String(selectedAccount.value || '').trim()
+  const sessionId = String(selectedContact.value?.username || '').trim()
+  const messageId = String(m?.id || '').trim()
+  if (!account || !sessionId || !messageId) return
+
+  const ok = window.confirm(
+    '确认反转该消息在微信客户端的左右气泡位置吗？\\n\\n这会修改 packed_info_data 字段（有风险）。\\n可通过“恢复原消息”撤销。'
+  )
+  if (!ok) return
+
+  try {
+    const api = useApi()
+    await api.flipChatMessageDirection({ account, session_id: sessionId, message_id: messageId })
+    closeContextMenu()
+    await refreshSelectedMessages()
+  } catch (e) {
+    window.alert(e?.message || '反转失败')
+  } finally {
+    closeContextMenu()
   }
 }
 
 const copyTextToClipboard = async (text) => {
   if (!process.client) return false
-  if (typeof text !== 'string') return false
+
+  const t = String(text ?? '').trim()
+  if (!t) return false
 
   try {
-    await navigator.clipboard.writeText(text)
+    await navigator.clipboard.writeText(t)
     return true
   } catch {}
 
+  // Fallback for insecure contexts / old browsers.
   try {
     const el = document.createElement('textarea')
-    el.value = text
+    el.value = t
     el.setAttribute('readonly', 'true')
     el.style.position = 'fixed'
     el.style.left = '-9999px'
@@ -3531,7 +4621,12 @@ const copyTextToClipboard = async (text) => {
     el.select()
     const ok = document.execCommand('copy')
     document.body.removeChild(el)
-    return ok
+    if (ok) return true
+  } catch {}
+
+  try {
+    window.prompt('复制内容：', t)
+    return true
   } catch {
     return false
   }
@@ -3674,6 +4769,164 @@ const closeMessageSearch = () => {
   messageSearchDebounceTimer = null
 }
 
+let timeSidebarReqId = 0
+
+const closeTimeSidebar = () => {
+  timeSidebarOpen.value = false
+  timeSidebarError.value = ''
+}
+
+const _timeSidebarCacheKey = ({ account, username, year, month }) => {
+  const acc = String(account || '').trim()
+  const u = String(username || '').trim()
+  const y = Number(year || 0)
+  const m = Number(month || 0)
+  return `${acc}|${u}|${y}-${_pad2(m)}`
+}
+
+const _applyTimeSidebarMonthData = (data) => {
+  const counts = (data && typeof data.counts === 'object' && !Array.isArray(data.counts)) ? data.counts : {}
+  timeSidebarCounts.value = counts
+  timeSidebarMax.value = Math.max(0, Number(data?.max || 0))
+  timeSidebarTotal.value = Math.max(0, Number(data?.total || 0))
+}
+
+const loadTimeSidebarMonth = async ({ year, month, force } = {}) => {
+  if (!selectedAccount.value) return
+  if (!selectedContact.value?.username) return
+
+  const y = Number(year || timeSidebarYear.value || 0)
+  const m = Number(month || timeSidebarMonth.value || 0)
+  if (!y || !m) return
+
+  timeSidebarYear.value = y
+  timeSidebarMonth.value = m
+
+  const key = _timeSidebarCacheKey({
+    account: selectedAccount.value,
+    username: selectedContact.value.username,
+    year: y,
+    month: m
+  })
+
+  if (!force) {
+    const cached = timeSidebarCache.value[key]
+    if (cached) {
+      timeSidebarError.value = ''
+      _applyTimeSidebarMonthData(cached)
+      return
+    }
+  }
+
+  const reqId = ++timeSidebarReqId
+  const api = useApi()
+  timeSidebarLoading.value = true
+  timeSidebarError.value = ''
+
+  try {
+    const resp = await api.getChatMessageDailyCounts({
+      account: selectedAccount.value,
+      username: selectedContact.value.username,
+      year: y,
+      month: m
+    })
+    if (reqId !== timeSidebarReqId) return
+    if (String(resp?.status || '') !== 'success') {
+      throw new Error(String(resp?.message || '加载日历失败'))
+    }
+
+    const data = {
+      counts: resp?.counts || {},
+      max: Number(resp?.max || 0),
+      total: Number(resp?.total || 0)
+    }
+
+    _applyTimeSidebarMonthData(data)
+    timeSidebarCache.value = { ...timeSidebarCache.value, [key]: data }
+  } catch (e) {
+    if (reqId !== timeSidebarReqId) return
+    timeSidebarError.value = e?.message || '加载日历失败'
+    _applyTimeSidebarMonthData({ counts: {}, max: 0, total: 0 })
+  } finally {
+    if (reqId === timeSidebarReqId) {
+      timeSidebarLoading.value = false
+    }
+  }
+}
+
+const _pickTimeSidebarInitialYearMonth = () => {
+  const list = messages.value || []
+  const last = Array.isArray(list) && list.length ? list[list.length - 1] : null
+  const ts = Number(last?.createTime || 0)
+  const d = ts ? new Date(ts * 1000) : new Date()
+  return { year: d.getFullYear(), month: d.getMonth() + 1 }
+}
+
+const _applyTimeSidebarSelectedDate = async (dateStr, { syncMonth } = {}) => {
+  const ds = String(dateStr || '').trim()
+  if (!ds) return
+  if (timeSidebarSelectedDate.value !== ds) {
+    timeSidebarSelectedDate.value = ds
+  }
+  if (!syncMonth || !timeSidebarOpen.value) return
+
+  const parts = ds.split('-')
+  const y = Number(parts?.[0] || 0)
+  const m = Number(parts?.[1] || 0)
+  if (!y || !m) return
+
+  if (Number(timeSidebarYear.value || 0) !== y || Number(timeSidebarMonth.value || 0) !== m) {
+    timeSidebarYear.value = y
+    timeSidebarMonth.value = m
+    // Fire and forget; request id guard + cache inside loadTimeSidebarMonth will handle racing.
+    await loadTimeSidebarMonth({ year: y, month: m, force: false })
+  }
+}
+
+const toggleTimeSidebar = async () => {
+  timeSidebarOpen.value = !timeSidebarOpen.value
+  if (!timeSidebarOpen.value) return
+  closeMessageSearch()
+
+  const { year, month } = _pickTimeSidebarInitialYearMonth()
+  timeSidebarYear.value = year
+  timeSidebarMonth.value = month
+
+  // Default selected day: current viewport's latest loaded message day (usually "latest").
+  const list = messages.value || []
+  const last = Array.isArray(list) && list.length ? list[list.length - 1] : null
+  const ds = _dateStrFromEpochSeconds(Number(last?.createTime || 0))
+  if (ds) await _applyTimeSidebarSelectedDate(ds, { syncMonth: false })
+
+  await loadTimeSidebarMonth({ year, month, force: false })
+}
+
+const prevTimeSidebarMonth = async () => {
+  const y0 = Number(timeSidebarYear.value || 0)
+  const m0 = Number(timeSidebarMonth.value || 0)
+  if (!y0 || !m0) return
+  const y = m0 === 1 ? (y0 - 1) : y0
+  const m = m0 === 1 ? 12 : (m0 - 1)
+  await loadTimeSidebarMonth({ year: y, month: m, force: false })
+}
+
+const nextTimeSidebarMonth = async () => {
+  const y0 = Number(timeSidebarYear.value || 0)
+  const m0 = Number(timeSidebarMonth.value || 0)
+  if (!y0 || !m0) return
+  const y = m0 === 12 ? (y0 + 1) : y0
+  const m = m0 === 12 ? 1 : (m0 + 1)
+  await loadTimeSidebarMonth({ year: y, month: m, force: false })
+}
+
+const onTimeSidebarYearMonthChange = async () => {
+  if (!timeSidebarOpen.value) return
+  const y = Number(timeSidebarYear.value || 0)
+  const m = Number(timeSidebarMonth.value || 0)
+  if (!y || !m) return
+  await loadTimeSidebarMonth({ year: y, month: m, force: false })
+}
+
 const ensureMessageSearchScopeValid = () => {
   if (messageSearchScope.value === 'conversation' && !selectedContact.value) {
     messageSearchScope.value = 'global'
@@ -3684,6 +4937,7 @@ const toggleMessageSearch = async () => {
   messageSearchOpen.value = !messageSearchOpen.value
   ensureMessageSearchScopeValid()
   if (!messageSearchOpen.value) return
+  closeTimeSidebar()
   await nextTick()
   try {
     messageSearchInputRef.value?.focus?.()
@@ -3871,9 +5125,15 @@ const exitSearchContext = async () => {
 
   searchContext.value = {
     active: false,
+    kind: 'search',
+    label: '',
     username: '',
     anchorId: '',
     anchorIndex: -1,
+    hasMoreBefore: false,
+    hasMoreAfter: false,
+    loadingBefore: false,
+    loadingAfter: false,
     savedMessages: null,
     savedMeta: null
   }
@@ -3902,14 +5162,26 @@ const locateSearchHit = async (hit) => {
   if (!searchContext.value?.active) {
     searchContext.value = {
       active: true,
+      kind: 'search',
+      label: '',
       username: targetUsername,
       anchorId: String(hit.id),
       anchorIndex: -1,
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+      loadingBefore: false,
+      loadingAfter: false,
       savedMessages: allMessages.value[targetUsername] || [],
       savedMeta: messagesMeta.value[targetUsername] || null
     }
   } else {
+    searchContext.value.kind = 'search'
+    searchContext.value.label = ''
     searchContext.value.anchorId = String(hit.id)
+    searchContext.value.hasMoreBefore = true
+    searchContext.value.hasMoreAfter = true
+    searchContext.value.loadingBefore = false
+    searchContext.value.loadingAfter = false
   }
 
   try {
@@ -3934,6 +5206,284 @@ const locateSearchHit = async (hit) => {
     if (ok) flashMessage(searchContext.value.anchorId)
   } catch (e) {
     window.alert(e?.message || '定位失败')
+  }
+}
+
+const locateByAnchorId = async ({ targetUsername, anchorId, kind, label } = {}) => {
+  if (!process.client) return
+  if (!selectedAccount.value) return
+  const u = String(targetUsername || selectedContact.value?.username || '').trim()
+  const anchor = String(anchorId || '').trim()
+  if (!u || !anchor) return
+
+  const targetContact = contacts.value.find((c) => c?.username === u)
+  if (targetContact && selectedContact.value?.username !== u) {
+    await selectContact(targetContact, { skipLoadMessages: true })
+  }
+
+  if (searchContext.value?.active && searchContext.value.username !== u) {
+    await exitSearchContext()
+  }
+
+  const kindNorm = String(kind || 'search').trim() || 'search'
+  const labelNorm = String(label || '').trim()
+  const hasMoreBeforeInit = kindNorm === 'first' ? false : true
+
+  if (!searchContext.value?.active) {
+    searchContext.value = {
+      active: true,
+      kind: kindNorm,
+      label: labelNorm,
+      username: u,
+      anchorId: anchor,
+      anchorIndex: -1,
+      hasMoreBefore: hasMoreBeforeInit,
+      hasMoreAfter: true,
+      loadingBefore: false,
+      loadingAfter: false,
+      savedMessages: allMessages.value[u] || [],
+      savedMeta: messagesMeta.value[u] || null
+    }
+  } else {
+    searchContext.value.kind = kindNorm
+    searchContext.value.label = labelNorm
+    searchContext.value.anchorId = anchor
+    searchContext.value.username = u
+    searchContext.value.hasMoreBefore = hasMoreBeforeInit
+    searchContext.value.hasMoreAfter = true
+    searchContext.value.loadingBefore = false
+    searchContext.value.loadingAfter = false
+  }
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessagesAround({
+      account: selectedAccount.value,
+      username: u,
+      anchor_id: anchor,
+      before: 35,
+      after: 35
+    })
+
+    const raw = resp?.messages || []
+    const mapped = raw.map(normalizeMessage)
+    allMessages.value = { ...allMessages.value, [u]: mapped }
+    messagesMeta.value = { ...messagesMeta.value, [u]: { total: mapped.length, hasMore: false } }
+
+    searchContext.value.anchorId = String(resp?.anchorId || anchor)
+    searchContext.value.anchorIndex = Number(resp?.anchorIndex ?? -1)
+
+    const ok = await scrollToMessageId(searchContext.value.anchorId)
+    if (ok) flashMessage(searchContext.value.anchorId)
+  } catch (e) {
+    window.alert(e?.message || '定位失败')
+  }
+}
+
+const locateByDate = async (dateStr) => {
+  if (!process.client) return
+  if (!selectedAccount.value) return
+  if (!selectedContact.value?.username) return
+
+  const ds = String(dateStr || '').trim()
+  if (!ds) return
+  await _applyTimeSidebarSelectedDate(ds, { syncMonth: true })
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessageAnchor({
+      account: selectedAccount.value,
+      username: selectedContact.value.username,
+      kind: 'day',
+      date: ds
+    })
+    const status = String(resp?.status || '')
+    const anchorId = String(resp?.anchorId || '').trim()
+    if (status !== 'success' || !anchorId) {
+      window.alert('当日暂无聊天记录')
+      return
+    }
+    await locateByAnchorId({ targetUsername: selectedContact.value.username, anchorId, kind: 'date', label: ds })
+  } catch (e) {
+    window.alert(e?.message || '定位失败')
+  }
+}
+
+const jumpToConversationFirst = async () => {
+  if (!process.client) return
+  if (!selectedAccount.value) return
+  if (!selectedContact.value?.username) return
+
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessageAnchor({
+      account: selectedAccount.value,
+      username: selectedContact.value.username,
+      kind: 'first'
+    })
+    const status = String(resp?.status || '')
+    const anchorId = String(resp?.anchorId || '').trim()
+    if (status !== 'success' || !anchorId) {
+      window.alert('暂无聊天记录')
+      return
+    }
+    const ds = _dateStrFromEpochSeconds(Number(resp?.createTime || 0))
+    if (ds) await _applyTimeSidebarSelectedDate(ds, { syncMonth: true })
+    await locateByAnchorId({ targetUsername: selectedContact.value.username, anchorId, kind: 'first', label: '' })
+  } catch (e) {
+    window.alert(e?.message || '定位失败')
+  }
+}
+
+const onTimeSidebarDayClick = async (cell) => {
+  if (!cell || cell.disabled) return
+  const ds = String(cell.dateStr || '').trim()
+  if (!ds) return
+  await locateByDate(ds)
+}
+
+const _mergeContextMessages = (username, nextList) => {
+  const u = String(username || '').trim()
+  if (!u) return
+  const list = Array.isArray(nextList) ? nextList : []
+  allMessages.value = { ...allMessages.value, [u]: list }
+  // Keep meta aligned; context mode doesn't rely on hasMore from meta.
+  const prevMeta = messagesMeta.value[u] || null
+  messagesMeta.value = {
+    ...messagesMeta.value,
+    [u]: {
+      total: Math.max(Number(prevMeta?.total || 0), list.length),
+      hasMore: false
+    }
+  }
+}
+
+const loadMoreSearchContextAfter = async () => {
+  if (!process.client) return
+  if (!selectedAccount.value) return
+  if (!searchContext.value?.active) return
+  if (searchContext.value.loadingAfter) return
+  if (!searchContext.value.hasMoreAfter) return
+
+  const u = String(searchContext.value.username || selectedContact.value?.username || '').trim()
+  if (!u) return
+  const existing = allMessages.value[u] || []
+  const last = Array.isArray(existing) && existing.length ? existing[existing.length - 1] : null
+  const anchorId = String(last?.id || '').trim()
+  if (!anchorId) {
+    searchContext.value.hasMoreAfter = false
+    return
+  }
+
+  const ctxUsername = u
+  searchContext.value.loadingAfter = true
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessagesAround({
+      account: selectedAccount.value,
+      username: ctxUsername,
+      anchor_id: anchorId,
+      before: 0,
+      after: messagePageSize
+    })
+
+    if (!searchContext.value?.active || String(searchContext.value.username || '').trim() !== ctxUsername) return
+
+    const raw = resp?.messages || []
+    const mapped = raw.map(normalizeMessage)
+
+    const existingIds = new Set(existing.map((m) => String(m?.id || '')))
+    const appended = []
+    for (const m of mapped) {
+      const id = String(m?.id || '').trim()
+      if (!id) continue
+      if (existingIds.has(id)) continue
+      existingIds.add(id)
+      appended.push(m)
+    }
+
+    if (!appended.length) {
+      searchContext.value.hasMoreAfter = false
+      return
+    }
+
+    _mergeContextMessages(ctxUsername, [...existing, ...appended])
+  } catch (e) {
+    window.alert(e?.message || '加载更多消息失败')
+  } finally {
+    if (searchContext.value?.active && String(searchContext.value.username || '').trim() === ctxUsername) {
+      searchContext.value.loadingAfter = false
+    }
+  }
+}
+
+const loadMoreSearchContextBefore = async () => {
+  if (!process.client) return
+  if (!selectedAccount.value) return
+  if (!searchContext.value?.active) return
+  if (searchContext.value.loadingBefore) return
+  if (!searchContext.value.hasMoreBefore) return
+
+  const u = String(searchContext.value.username || selectedContact.value?.username || '').trim()
+  if (!u) return
+  const existing = allMessages.value[u] || []
+  const first = Array.isArray(existing) && existing.length ? existing[0] : null
+  const anchorId = String(first?.id || '').trim()
+  if (!anchorId) {
+    searchContext.value.hasMoreBefore = false
+    return
+  }
+
+  const c = messageContainerRef.value
+  const beforeScrollHeight = c ? c.scrollHeight : 0
+  const beforeScrollTop = c ? c.scrollTop : 0
+
+  const ctxUsername = u
+  searchContext.value.loadingBefore = true
+  try {
+    const api = useApi()
+    const resp = await api.getChatMessagesAround({
+      account: selectedAccount.value,
+      username: ctxUsername,
+      anchor_id: anchorId,
+      before: messagePageSize,
+      after: 0
+    })
+
+    if (!searchContext.value?.active || String(searchContext.value.username || '').trim() !== ctxUsername) return
+
+    const raw = resp?.messages || []
+    const mapped = raw.map(normalizeMessage)
+
+    const existingIds = new Set(existing.map((m) => String(m?.id || '')))
+    const prepended = []
+    for (const m of mapped) {
+      const id = String(m?.id || '').trim()
+      if (!id) continue
+      if (existingIds.has(id)) continue
+      existingIds.add(id)
+      prepended.push(m)
+    }
+
+    if (!prepended.length) {
+      searchContext.value.hasMoreBefore = false
+      return
+    }
+
+    _mergeContextMessages(ctxUsername, [...prepended, ...existing])
+
+    await nextTick()
+    const c2 = messageContainerRef.value
+    if (c2) {
+      const afterScrollHeight = c2.scrollHeight
+      c2.scrollTop = beforeScrollTop + (afterScrollHeight - beforeScrollHeight)
+    }
+  } catch (e) {
+    window.alert(e?.message || '加载更多消息失败')
+  } finally {
+    if (searchContext.value?.active && String(searchContext.value.username || '').trim() === ctxUsername) {
+      searchContext.value.loadingBefore = false
+    }
   }
 }
 
@@ -4192,6 +5742,16 @@ const isTransferReturned = (message) => {
   return text.includes('退回') || text.includes('退还')
 }
 
+const isTransferOverdue = (message) => {
+  const paySubType = String(message?.paySubType || '').trim()
+  if (paySubType === '10') return true
+  const s = String(message?.transferStatus || '').trim()
+  const c = String(message?.content || '').trim()
+  const text = `${s} ${c}`.trim()
+  if (!text) return false
+  return text.includes('过期')
+}
+
 const getTransferTitle = (message) => {
   const paySubType = String(message.paySubType || '').trim()
   // paysubtype 含义：
@@ -4200,7 +5760,7 @@ const getTransferTitle = (message) => {
   if (message.transferStatus) return message.transferStatus
   switch (paySubType) {
     case '1': return '转账'
-    case '3': return message.isSent ? '已收款' : '已被接收'
+    case '3': return message.isSent ? '已被接收' : '已收款'
     case '8': return '发起转账'
     case '4': return '已退还'
     case '9': return '已被退还'
@@ -4212,15 +5772,45 @@ const getTransferTitle = (message) => {
   return '转账'
 }
 
+// 反转消息位置（仅影响本工具显示，不建议通过写坏 BLOB 字段来实现）
+const reverseMessageSides = ref(false)
+const reverseSidesStorageKey = computed(() => {
+  const a = String(selectedAccount.value || '').trim()
+  const sid = String(selectedContact.value?.username || '').trim()
+  if (a && sid) return `wechatda:reverse_message_sides:${a}:${sid}`
+  return 'wechatda:reverse_message_sides:global'
+})
+const loadReverseMessageSides = () => {
+  if (!process.client) return
+  try {
+    const v = localStorage.getItem(reverseSidesStorageKey.value)
+    reverseMessageSides.value = v === '1'
+  } catch {}
+}
+watch(reverseSidesStorageKey, () => loadReverseMessageSides(), { immediate: true })
+watch(reverseMessageSides, (v) => {
+  if (!process.client) return
+  try {
+    localStorage.setItem(reverseSidesStorageKey.value, v ? '1' : '0')
+  } catch {}
+})
+const toggleReverseMessageSides = () => {
+  reverseMessageSides.value = !reverseMessageSides.value
+}
+
 const renderMessages = computed(() => {
   const list = messages.value || []
+  const reverseSides = !!reverseMessageSides.value
   let prevTs = 0
   return list.map((m) => {
     const ts = Number(m.createTime || 0)
     const show = !prevTs || (ts && Math.abs(ts - prevTs) >= 300)
     if (ts) prevTs = ts
+    const origIsSent = !!m?.isSent
     return {
       ...m,
+      _originalIsSent: origIsSent,
+      isSent: reverseSides ? !origIsSent : origIsSent,
       showTimeDivider: !!show,
       timeDivider: formatTimeDivider(ts)
     }
@@ -4302,23 +5892,18 @@ onMounted(() => {
 })
 
 const loadContacts = async () => {
-  const api = useApi()
   isLoadingContacts.value = true
   contactsError.value = ''
 
   try {
-    const accountsResp = await api.listChatAccounts()
-    const accounts = accountsResp?.accounts || []
-    availableAccounts.value = accounts
-    selectedAccount.value = selectedAccount.value || accountsResp?.default_account || accounts[0] || null
+    await chatAccounts.ensureLoaded()
 
     if (!selectedAccount.value) {
       contacts.value = []
       selectedContact.value = null
-      contactsError.value = accountsResp?.message || '未检测到已解密账号，请先解密数据库。'
+      contactsError.value = chatAccounts.error || '未检测到已解密账号，请先解密数据库。'
       return
     }
-
     await loadSessionsForSelectedAccount()
   } catch (e) {
     contacts.value = []
@@ -4372,6 +5957,7 @@ const loadSessionsForSelectedAccount = async () => {
     lastMessageTime: s.lastMessageTime || '',
     unreadCount: s.unreadCount || 0,
     isGroup: !!s.isGroup,
+    isTop: !!s.isTop,
     username: s.username
   }))
 
@@ -4381,6 +5967,12 @@ const loadSessionsForSelectedAccount = async () => {
   selectedContact.value = null
 
   closeMessageSearch()
+  closeTimeSidebar()
+  timeSidebarYear.value = null
+  timeSidebarMonth.value = null
+  _applyTimeSidebarMonthData({ counts: {}, max: 0, total: 0 })
+  timeSidebarError.value = ''
+  timeSidebarSelectedDate.value = ''
   messageSearchResults.value = []
   messageSearchOffset.value = 0
   messageSearchHasMore.value = false
@@ -4390,9 +5982,15 @@ const loadSessionsForSelectedAccount = async () => {
   messageSearchSelectedIndex.value = -1
   searchContext.value = {
     active: false,
+    kind: 'search',
+    label: '',
     username: '',
     anchorId: '',
     anchorIndex: -1,
+    hasMoreBefore: false,
+    hasMoreAfter: false,
+    loadingBefore: false,
+    loadingAfter: false,
     savedMessages: null,
     savedMeta: null
   }
@@ -4445,6 +6043,7 @@ const refreshSessionsForSelectedAccount = async ({ sourceOverride } = {}) => {
     lastMessageTime: s.lastMessageTime || '',
     unreadCount: s.unreadCount || 0,
     isGroup: !!s.isGroup,
+    isTop: !!s.isTop,
     username: s.username
   }))
 
@@ -4471,49 +6070,6 @@ const queueRealtimeSessionsRefresh = () => {
       queueRealtimeSessionsRefresh()
     }
   })
-}
-
-const runRealtimeFullSync = async (priorityUsername) => {
-  if (!realtimeEnabled.value) return null
-  if (!process.client || typeof window === 'undefined') return null
-  if (!selectedAccount.value) return null
-
-  try {
-    const api = useApi()
-    return await api.syncChatRealtimeAll({
-      account: selectedAccount.value,
-      max_scan: 200,
-      priority_username: String(priorityUsername || '').trim(),
-      priority_max_scan: 600,
-      include_hidden: true,
-      include_official: true
-    })
-  } catch {
-    return null
-  }
-}
-
-const queueRealtimeFullSync = (priorityUsername) => {
-  const u = String(priorityUsername || '').trim()
-  if (u) realtimeFullSyncPriority = u
-
-  if (realtimeFullSyncFuture) {
-    realtimeFullSyncQueued = true
-    return realtimeFullSyncFuture
-  }
-
-  const priority = realtimeFullSyncPriority
-  realtimeFullSyncPriority = ''
-
-  realtimeFullSyncFuture = runRealtimeFullSync(priority).finally(() => {
-    realtimeFullSyncFuture = null
-    if (realtimeFullSyncQueued) {
-      realtimeFullSyncQueued = false
-      queueRealtimeFullSync(realtimeFullSyncPriority)
-    }
-  })
-
-  return realtimeFullSyncFuture
 }
 
 const onAccountChange = async () => {
@@ -4574,7 +6130,12 @@ const normalizeMessage = (msg) => {
   const fromUsername = String(msg.fromUsername || '').trim()
   const fromAvatar = fromUsername
     ? `${mediaBase}/api/chat/avatar?account=${encodeURIComponent(selectedAccount.value || '')}&username=${encodeURIComponent(fromUsername)}`
-    : ''
+    : (() => {
+      // App/web link shares may not provide `fromUsername` (sourceusername), so we don't have a WeChat avatar.
+      // Fall back to a best-effort website favicon fetched via backend.
+      const href = String(msg.url || '').trim()
+      return href ? `${mediaBase}/api/chat/media/favicon?url=${encodeURIComponent(href)}` : ''
+    })()
 
   const localEmojiUrl = msg.emojiMd5 ? `${mediaBase}/api/chat/media/emoji?account=${encodeURIComponent(selectedAccount.value || '')}&md5=${encodeURIComponent(msg.emojiMd5)}&username=${encodeURIComponent(selectedContact.value?.username || '')}` : ''
   const localImageUrl = (() => {
@@ -4664,6 +6225,36 @@ const normalizeMessage = (msg) => {
     }
   }
 
+  const quoteServerIdStr = String(msg.quoteServerId || '').trim()
+  const quoteTypeStr = String(msg.quoteType || '').trim()
+  const quoteVoiceUrl = quoteServerIdStr
+    ? `${mediaBase}/api/chat/media/voice?account=${encodeURIComponent(selectedAccount.value || '')}&server_id=${encodeURIComponent(quoteServerIdStr)}`
+    : ''
+  const quoteImageUrl = (() => {
+    if (!quoteServerIdStr) return ''
+    if (quoteTypeStr !== '3' && String(msg.quoteContent || '').trim() !== '[图片]') return ''
+    const convUsername = String(selectedContact.value?.username || '').trim()
+    const parts = [
+      `account=${encodeURIComponent(selectedAccount.value || '')}`,
+      `server_id=${encodeURIComponent(quoteServerIdStr)}`,
+      convUsername ? `username=${encodeURIComponent(convUsername)}` : ''
+    ].filter(Boolean)
+    return parts.length ? `${mediaBase}/api/chat/media/image?${parts.join('&')}` : ''
+  })()
+  const quoteThumbUrl = (() => {
+    const raw = isUsableMediaUrl(msg.quoteThumbUrl) ? normalizeMaybeUrl(msg.quoteThumbUrl) : ''
+    if (!raw) return ''
+    if (/^\/api\/chat\/media\//i.test(raw) || /^blob:/i.test(raw) || /^data:/i.test(raw)) return raw
+    if (!/^https?:\/\//i.test(raw)) return raw
+    try {
+      const host = new URL(raw).hostname.toLowerCase()
+      if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
+        return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+      }
+    } catch {}
+    return raw
+  })()
+
   return {
     id: msg.id,
     serverId: msg.serverId || 0,
@@ -4700,22 +6291,27 @@ const normalizeMessage = (msg) => {
     quoteTitle: msg.quoteTitle || '',
     quoteContent,
     quoteUsername: msg.quoteUsername || '',
-    quoteServerId: String(msg.quoteServerId || '').trim(),
-    quoteType: String(msg.quoteType || '').trim(),
+    quoteServerId: quoteServerIdStr,
+    quoteType: quoteTypeStr,
     quoteVoiceLength: msg.quoteVoiceLength || '',
-    quoteVoiceUrl: String(msg.quoteServerId || '').trim()
-      ? `${mediaBase}/api/chat/media/voice?account=${encodeURIComponent(selectedAccount.value || '')}&server_id=${encodeURIComponent(String(msg.quoteServerId || '').trim())}`
-      : '',
+    quoteVoiceUrl,
+    quoteImageUrl: quoteImageUrl || '',
+    quoteThumbUrl: quoteThumbUrl || '',
+    _quoteImageError: false,
+    _quoteThumbError: false,
     amount: msg.amount || '',
     coverUrl: msg.coverUrl || '',
     fileSize: msg.fileSize || '',
     fileMd5: msg.fileMd5 || '',
     paySubType: msg.paySubType || '',
     transferStatus: msg.transferStatus || '',
-    transferReceived: msg.paySubType === '3' || msg.transferStatus === '已收款',
+    transferReceived: msg.paySubType === '3' || msg.transferStatus === '已收款' || msg.transferStatus === '已被接收',
     voiceUrl: normalizedVoiceUrl || '',
     voiceDuration: msg.voiceLength || msg.voiceDuration || '',
     preview: normalizedLinkPreviewUrl || '',
+    linkType: String(msg.linkType || '').trim(),
+    linkStyle: String(msg.linkStyle || '').trim(),
+    linkCardVariant: String(msg.linkStyle || '').trim() === 'cover' ? 'cover' : 'default',
     from: String(msg.from || '').trim(),
     fromUsername,
     fromAvatar,
@@ -4779,11 +6375,130 @@ const getChatHistoryPreviewLines = (message) => {
   return raw.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).slice(0, 4)
 }
 
-// 合并转发聊天记录弹窗
+// 浮动窗口：合并消息 / 链接卡片（支持同时打开多个，且可拖动）
+const floatingWindows = ref([])
+let floatingWindowSeq = 0
+let floatingWindowZ = 70
+const floatingDragState = { id: '', offsetX: 0, offsetY: 0 }
+
+const clampNumber = (n, min, max) => Math.min(max, Math.max(min, n))
+const getFloatingWindowById = (id) => {
+  const list = Array.isArray(floatingWindows.value) ? floatingWindows.value : []
+  return list.find((w) => String(w?.id || '') === String(id || '')) || null
+}
+
+const focusFloatingWindow = (id) => {
+  const w = getFloatingWindowById(id)
+  if (!w) return
+  floatingWindowZ += 1
+  w.zIndex = floatingWindowZ
+}
+
+const closeFloatingWindow = (id) => {
+  const key = String(id || '')
+  floatingWindows.value = (Array.isArray(floatingWindows.value) ? floatingWindows.value : []).filter((w) => String(w?.id || '') !== key)
+  if (floatingDragState.id && String(floatingDragState.id) === key) {
+    floatingDragState.id = ''
+  }
+}
+
+const closeTopFloatingWindow = () => {
+  const list = Array.isArray(floatingWindows.value) ? floatingWindows.value : []
+  if (!list.length) return
+  const top = list.reduce((acc, cur) => (Number(cur?.zIndex || 0) >= Number(acc?.zIndex || 0) ? cur : acc), list[0])
+  if (top?.id) closeFloatingWindow(top.id)
+}
+
+const openFloatingWindow = (payload) => {
+  if (!process.client) return null
+  const w0 = Number(payload?.width || 0) > 0 ? Number(payload.width) : 560
+  const h0 = Number(payload?.height || 0) > 0 ? Number(payload.height) : 560
+  const margin = 12
+  const vpW = Math.max(320, window.innerWidth || 0)
+  const vpH = Math.max(240, window.innerHeight || 0)
+  const n = (Array.isArray(floatingWindows.value) ? floatingWindows.value.length : 0)
+  const dx = 24 * (n % 6)
+  const dy = 24 * (n % 6)
+  const x0 = payload?.x != null ? Number(payload.x) : Math.round((vpW - w0) / 2 + dx)
+  const y0 = payload?.y != null ? Number(payload.y) : Math.round((vpH - h0) / 2 + dy)
+
+  floatingWindowSeq += 1
+  floatingWindowZ += 1
+  const win = {
+    id: String(payload?.id || `fw_${Date.now()}_${floatingWindowSeq}`),
+    kind: String(payload?.kind || 'chatHistory'),
+    title: String(payload?.title || ''),
+    zIndex: floatingWindowZ,
+    x: clampNumber(x0, margin, Math.max(margin, vpW - w0 - margin)),
+    y: clampNumber(y0, margin, Math.max(margin, vpH - h0 - margin)),
+    width: w0,
+    height: h0,
+    // custom data per kind
+    info: payload?.info || null,
+    records: Array.isArray(payload?.records) ? payload.records : [],
+    url: String(payload?.url || ''),
+    content: String(payload?.content || ''),
+    preview: String(payload?.preview || ''),
+    from: String(payload?.from || ''),
+    fromAvatar: String(payload?.fromAvatar || ''),
+    loading: !!payload?.loading,
+  }
+  floatingWindows.value = [...(Array.isArray(floatingWindows.value) ? floatingWindows.value : []), win]
+  // Return the reactive proxy from the state array; otherwise mutating the raw object won't trigger re-renders
+  // (the UI would only update after an unrelated reactive change such as focusing the window).
+  return getFloatingWindowById(win.id) || win
+}
+
+const startFloatingWindowDrag = (id, e) => {
+  if (!process.client) return
+  const w = getFloatingWindowById(id)
+  if (!w) return
+  focusFloatingWindow(id)
+  const ev = e?.touches?.[0] || e
+  const cx = Number(ev?.clientX || 0)
+  const cy = Number(ev?.clientY || 0)
+  floatingDragState.id = String(id || '')
+  floatingDragState.offsetX = cx - Number(w.x || 0)
+  floatingDragState.offsetY = cy - Number(w.y || 0)
+  try { e?.preventDefault?.() } catch {}
+}
+
+const onFloatingWindowMouseMove = (e) => {
+  if (!process.client) return
+  const id = String(floatingDragState.id || '')
+  if (!id) return
+  const w = getFloatingWindowById(id)
+  if (!w) return
+  const ev = e?.touches?.[0] || e
+  const cx = Number(ev?.clientX || 0)
+  const cy = Number(ev?.clientY || 0)
+  const margin = 8
+  const vpW = Math.max(320, window.innerWidth || 0)
+  const vpH = Math.max(240, window.innerHeight || 0)
+  const nx = cx - Number(floatingDragState.offsetX || 0)
+  const ny = cy - Number(floatingDragState.offsetY || 0)
+  w.x = clampNumber(nx, margin, Math.max(margin, vpW - Number(w.width || 0) - margin))
+  w.y = clampNumber(ny, margin, Math.max(margin, vpH - Number(w.height || 0) - margin))
+}
+
+const onFloatingWindowMouseUp = () => {
+  floatingDragState.id = ''
+}
+
+// Legacy modal state kept only so the old template block compiles (we now use floating windows instead).
 const chatHistoryModalVisible = ref(false)
 const chatHistoryModalTitle = ref('')
 const chatHistoryModalRecords = ref([])
 const chatHistoryModalInfo = ref({ isChatRoom: false })
+const chatHistoryModalStack = ref([])
+const goBackChatHistoryModal = () => {}
+const closeChatHistoryModal = () => {
+  chatHistoryModalVisible.value = false
+  chatHistoryModalTitle.value = ''
+  chatHistoryModalRecords.value = []
+  chatHistoryModalInfo.value = { isChatRoom: false }
+  chatHistoryModalStack.value = []
+}
 
 const isMaybeMd5 = (value) => /^[0-9a-f]{32}$/i.test(String(value || '').trim())
 const pickFirstMd5 = (...values) => {
@@ -4795,6 +6510,10 @@ const pickFirstMd5 = (...values) => {
 }
 
 const normalizeChatHistoryUrl = (value) => String(value || '').trim().replace(/\s+/g, '')
+const stripWeChatInvisible = (value) => {
+  // WeChat sometimes uses invisible filler characters like U+3164 (Hangul Filler) for "empty".
+  return String(value || '').replace(/[\u3164\u2800]/g, '').trim()
+}
 
 const parseChatHistoryRecord = (recordItemXml) => {
   if (!process.client) return { info: null, items: [] }
@@ -4819,11 +6538,59 @@ const parseChatHistoryRecord = (recordItemXml) => {
 
   const getText = (node, tag) => {
     try {
-      const el = node.getElementsByTagName(tag)?.[0]
+      if (!node) return ''
+      const els = Array.from(node.getElementsByTagName(tag) || [])
+      const direct = els.find((el) => el && el.parentNode === node)
+      const el = direct || els[0]
       return String(el?.textContent || '').trim()
     } catch {
       return ''
     }
+  }
+
+  const getDirectChildXml = (node, tag) => {
+    try {
+      if (!node) return ''
+      const children = Array.from(node.children || [])
+      const el = children.find((c) => String(c?.tagName || '').toLowerCase() === String(tag || '').toLowerCase())
+      if (!el) return ''
+      // If the child is a plain text/CDATA wrapper that contains another XML document, prefer that raw string.
+      const raw = String(el.textContent || '').trim()
+      if (raw && raw.startsWith('<') && raw.endsWith('>')) return raw
+
+      // Otherwise serialize the element (nested recorditem may be provided as real XML nodes).
+      if (typeof XMLSerializer !== 'undefined') {
+        return new XMLSerializer().serializeToString(el)
+      }
+    } catch {}
+    return ''
+  }
+
+  const getAnyXml = (node, tag) => {
+    try {
+      if (!node) return ''
+      const els = Array.from(node.getElementsByTagName(tag) || [])
+      const direct = els.find((el) => el && el.parentNode === node)
+      const el = direct || els[0]
+      if (!el) return ''
+
+      const raw = String(el.textContent || '').trim()
+      if (raw && raw.startsWith('<') && raw.endsWith('>')) return raw
+      if (typeof XMLSerializer !== 'undefined') return new XMLSerializer().serializeToString(el)
+    } catch {}
+    return ''
+  }
+
+  const sameTag = (el, tag) => String(el?.tagName || '').toLowerCase() === String(tag || '').toLowerCase()
+
+  const closestAncestorByTag = (node, tag) => {
+    const lower = String(tag || '').toLowerCase()
+    let cur = node
+    while (cur) {
+      if (cur.nodeType === 1 && String(cur.tagName || '').toLowerCase() === lower) return cur
+      cur = cur.parentNode
+    }
+    return null
   }
 
   const root = doc?.documentElement
@@ -4831,16 +6598,42 @@ const parseChatHistoryRecord = (recordItemXml) => {
   const title = getText(root, 'title')
   const desc = getText(root, 'desc') || getText(root, 'info')
 
-  const items = Array.from(doc.getElementsByTagName('dataitem') || [])
-  const parsed = items.map((node, idx) => {
-    const datatype = String(node.getAttribute('datatype') || '').trim()
-    const dataid = String(node.getAttribute('dataid') || '').trim() || String(idx)
+  const datalist = (() => {
+    try {
+      const all = Array.from(doc.getElementsByTagName('datalist') || [])
+      // Prefer the datalist belonging to the top-level recorditem to avoid flattening nested records.
+      const top = root ? all.find((el) => closestAncestorByTag(el, 'recorditem') === root) : null
+      return top || all[0] || null
+    } catch {
+      return null
+    }
+  })()
+  const datalistCount = (() => {
+    try {
+      if (!datalist) return 0
+      const v = String(datalist.getAttribute('count') || '').trim()
+      return Math.max(0, parseInt(v, 10) || 0)
+    } catch {
+      return 0
+    }
+  })()
+
+  const itemNodes = (() => {
+    if (datalist) return Array.from(datalist.children || []).filter((el) => sameTag(el, 'dataitem'))
+    // Some recordItem payloads omit the <datalist> wrapper.
+    return Array.from(root?.children || []).filter((el) => sameTag(el, 'dataitem'))
+  })()
+
+  const parsed = itemNodes.map((node, idx) => {
+    const datatype = String(node.getAttribute('datatype') || getText(node, 'datatype') || '').trim()
+    const dataid = String(node.getAttribute('dataid') || getText(node, 'dataid') || '').trim() || String(idx)
 
     const sourcename = getText(node, 'sourcename')
     const sourcetime = getText(node, 'sourcetime')
     const sourceheadurl = normalizeChatHistoryUrl(getText(node, 'sourceheadurl'))
     const datatitle = getText(node, 'datatitle')
     const datadesc = getText(node, 'datadesc')
+    const link = normalizeChatHistoryUrl(getText(node, 'link') || getText(node, 'dataurl') || getText(node, 'url'))
     const datafmt = getText(node, 'datafmt')
     const duration = getText(node, 'duration')
 
@@ -4848,12 +6641,13 @@ const parseChatHistoryRecord = (recordItemXml) => {
     const thumbfullmd5 = getText(node, 'thumbfullmd5')
     const md5 = getText(node, 'md5') || getText(node, 'emoticonmd5') || getText(node, 'emojiMd5')
     const fromnewmsgid = getText(node, 'fromnewmsgid')
-    const srcMsgLocalid = getText(node, 'srcMsgLocalid')
+    const srcMsgLocalid = getText(node, 'srcMsgLocalid') || getText(node, 'srcMsgLocalId')
     const srcMsgCreateTime = getText(node, 'srcMsgCreateTime')
     const cdnurlstring = normalizeChatHistoryUrl(getText(node, 'cdnurlstring'))
     const encrypturlstring = normalizeChatHistoryUrl(getText(node, 'encrypturlstring'))
     const externurl = normalizeChatHistoryUrl(getText(node, 'externurl'))
     const aeskey = getText(node, 'aeskey')
+    const nestedRecordItem = getAnyXml(node, 'recorditem') || getDirectChildXml(node, 'recorditem') || getText(node, 'recorditem')
 
     let content = datatitle || datadesc
     if (!content) {
@@ -4869,7 +6663,11 @@ const parseChatHistoryRecord = (recordItemXml) => {
     const imageFormats = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'])
 
     let renderType = 'text'
-    if (datatype === '4' || String(duration || '').trim() || fmt === 'mp4') {
+    if (datatype === '17') {
+      renderType = 'chatHistory'
+    } else if (datatype === '5' || link) {
+      renderType = 'link'
+    } else if (datatype === '4' || String(duration || '').trim() || fmt === 'mp4') {
       renderType = 'video'
     } else if (datatype === '47' || datatype === '37') {
       renderType = 'emoji'
@@ -4883,6 +6681,26 @@ const parseChatHistoryRecord = (recordItemXml) => {
     } else if (isMaybeMd5(md5) && /表情/.test(String(content || ''))) {
       // Some merged-forward records use non-standard datatype but still provide emoticon md5.
       renderType = 'emoji'
+    }
+
+    let outTitle = ''
+    let outUrl = ''
+    let recordItem = ''
+    if (renderType === 'chatHistory') {
+      outTitle = datatitle || content || '聊天记录'
+      content = datadesc || ''
+      recordItem = nestedRecordItem
+    } else if (renderType === 'link') {
+      outTitle = datatitle || content || ''
+      outUrl = link || externurl || ''
+      const cleanDesc = stripWeChatInvisible(datadesc)
+      const cleanTitle = stripWeChatInvisible(outTitle)
+      // Keep card description only when it's not a filler placeholder and not identical to the title.
+      if (!cleanDesc || (cleanTitle && cleanDesc === cleanTitle)) {
+        content = ''
+      } else {
+        content = String(datadesc || '').trim()
+      }
     }
 
     return {
@@ -4904,12 +6722,15 @@ const parseChatHistoryRecord = (recordItemXml) => {
       externurl,
       aeskey,
       renderType,
+      title: outTitle,
+      recordItem,
+      url: outUrl,
       content
     }
   })
 
   return {
-    info: { isChatRoom, title, desc },
+    info: { isChatRoom, title, desc, count: datalistCount },
     items: parsed
   }
 }
@@ -4932,7 +6753,52 @@ const normalizeChatHistoryRecordItem = (rec) => {
   out.senderAvatar = normalizeChatHistoryUrl(out.sourceheadurl)
   out.fullTime = String(out.sourcetime || '').trim()
 
-  if (out.renderType === 'video') {
+  if (out.renderType === 'link') {
+    const linkUrl = String(out.url || out.externurl || '').trim()
+    out.url = linkUrl
+    out.from = String(out.from || '').trim()
+    const previewCandidates = []
+
+    // Some link cards store thumbnails with a "file_id" naming scheme: local_id_create_time.
+    const fileId = (() => {
+      const lid = parseInt(String(out.srcMsgLocalid || '').trim(), 10) || 0
+      const ct = parseInt(String(out.srcMsgCreateTime || '').trim(), 10) || 0
+      if (lid > 0 && ct > 0) return `${lid}_${ct}`
+      return ''
+    })()
+    if (fileId) {
+      previewCandidates.push(
+        `${mediaBase}/api/chat/media/image?account=${account}&file_id=${encodeURIComponent(fileId)}&username=${username}`
+      )
+    }
+
+    // Fallback: some records still carry md5-ish fields.
+    out.previewMd5 = pickFirstMd5(out.fullmd5, out.thumbfullmd5, out.md5)
+    const srcServerId = String(out.fromnewmsgid || '').trim()
+    if (out.previewMd5) {
+      const previewParts = [
+        `account=${account}`,
+        `md5=${encodeURIComponent(out.previewMd5)}`,
+        srcServerId ? `server_id=${encodeURIComponent(srcServerId)}` : '',
+        `username=${username}`
+      ].filter(Boolean)
+      previewCandidates.push(`${mediaBase}/api/chat/media/image?${previewParts.join('&')}`)
+    }
+
+    out._linkPreviewCandidates = previewCandidates
+    out._linkPreviewCandidateIndex = 0
+    out._linkPreviewError = false
+    out.preview = previewCandidates[0] || ''
+
+    const fromUsername = String(out.fromUsername || '').trim()
+    out.fromUsername = fromUsername
+    out.fromAvatar = fromUsername
+      ? `${mediaBase}/api/chat/avatar?account=${account}&username=${encodeURIComponent(fromUsername)}`
+      : (linkUrl ? `${mediaBase}/api/chat/media/favicon?url=${encodeURIComponent(linkUrl)}` : '')
+    out._fromAvatarLast = out.fromAvatar
+    out._fromAvatarImgOk = false
+    out._fromAvatarImgError = false
+  } else if (out.renderType === 'video') {
     out.videoMd5 = pickFirstMd5(out.fullmd5, out.md5)
     out.videoThumbMd5 = pickFirstMd5(out.thumbfullmd5)
     out.videoDuration = String(out.duration || '').trim()
@@ -5097,6 +6963,45 @@ const onChatHistoryVideoThumbError = (rec) => {
   rec._videoThumbError = true
 }
 
+const onChatHistoryLinkPreviewError = (rec) => {
+  if (!rec) return
+  const candidates = rec._linkPreviewCandidates
+  if (!Array.isArray(candidates) || candidates.length <= 1) {
+    rec._linkPreviewError = true
+    return
+  }
+
+  const cur = Math.max(0, Number(rec._linkPreviewCandidateIndex || 0))
+  const next = cur + 1
+  if (next < candidates.length) {
+    rec._linkPreviewCandidateIndex = next
+    rec.preview = candidates[next]
+    rec._linkPreviewError = false
+    return
+  }
+  rec._linkPreviewError = true
+}
+
+const onChatHistoryFromAvatarLoad = (rec) => {
+  try {
+    if (rec) {
+      rec._fromAvatarImgOk = true
+      rec._fromAvatarImgError = false
+      rec._fromAvatarLast = String(rec.fromAvatar || '').trim()
+    }
+  } catch {}
+}
+
+const onChatHistoryFromAvatarError = (rec) => {
+  try {
+    if (rec) {
+      rec._fromAvatarImgOk = false
+      rec._fromAvatarImgError = true
+      rec._fromAvatarLast = String(rec.fromAvatar || '').trim()
+    }
+  } catch {}
+}
+
 const onChatHistoryQuoteThumbError = (rec) => {
   if (!rec || !rec.quote) return
   const candidates = rec._quoteThumbCandidates
@@ -5136,33 +7041,301 @@ const openChatHistoryQuote = (rec) => {
   }
 }
 
-const openChatHistoryModal = (message) => {
-  if (!process.client) return
-  chatHistoryModalTitle.value = String(message?.title || '聊天记录')
-
-  const recordItem = String(message?.recordItem || '').trim()
-  const parsed = parseChatHistoryRecord(recordItem)
-  chatHistoryModalInfo.value = parsed?.info || { isChatRoom: false }
-  const records = parsed?.items
-  chatHistoryModalRecords.value = Array.isArray(records) ? enhanceChatHistoryRecords(records.map(normalizeChatHistoryRecordItem)) : []
-
-  if (!chatHistoryModalRecords.value.length) {
-    // 降级：使用摘要内容按行展示
-    const lines = String(message?.content || '').trim().split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
-    chatHistoryModalInfo.value = { isChatRoom: false }
-    chatHistoryModalRecords.value = lines.map((line, idx) => normalizeChatHistoryRecordItem({ id: String(idx), datatype: '1', sourcename: '', sourcetime: '', content: line, renderType: 'text' }))
+const isChatHistoryRecordItemIncomplete = (recordItemXml) => {
+  const recordItem = String(recordItemXml || '').trim()
+  if (!recordItem) return true
+  try {
+    const parsed = parseChatHistoryRecord(recordItem)
+    const got = Array.isArray(parsed?.items) ? parsed.items.length : 0
+    const expect = Math.max(0, parseInt(String(parsed?.info?.count || '0'), 10) || 0)
+    if (expect > 0 && got < expect) return true
+    if (got <= 0) return true
+  } catch {
+    return true
   }
-
-  chatHistoryModalVisible.value = true
-  document.body.style.overflow = 'hidden'
+  return false
 }
 
-const closeChatHistoryModal = () => {
-  chatHistoryModalVisible.value = false
-  chatHistoryModalTitle.value = ''
-  chatHistoryModalRecords.value = []
-  chatHistoryModalInfo.value = { isChatRoom: false }
-  document.body.style.overflow = previewImageUrl.value ? 'hidden' : ''
+const buildChatHistoryWindowPayload = (payload) => {
+  const title0 = String(payload?.title || '聊天记录')
+  const content0 = String(payload?.content || '')
+  const recordItem0 = String(payload?.recordItem || '').trim()
+  const parsed = parseChatHistoryRecord(recordItem0)
+  const info0 = parsed?.info || { isChatRoom: false, count: 0 }
+  const items = Array.isArray(parsed?.items) ? parsed.items : []
+  let records0 = items.length ? enhanceChatHistoryRecords(items.map(normalizeChatHistoryRecordItem)) : []
+  if (!records0.length) {
+    // 降级：使用摘要内容按行展示
+    const lines = content0.trim().split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+    records0 = lines.map((line, idx) => normalizeChatHistoryRecordItem({
+      id: String(idx),
+      datatype: '1',
+      sourcename: '',
+      sourcetime: '',
+      content: line,
+      renderType: 'text'
+    }))
+  }
+  return { title0, content0, recordItem0, info0, records0 }
+}
+
+const openChatHistoryModal = (message) => {
+  if (!process.client) return
+  const { title0, content0, recordItem0, info0, records0 } = buildChatHistoryWindowPayload(message)
+  const win = openFloatingWindow({
+    kind: 'chatHistory',
+    title: title0 || '聊天记录',
+    info: info0,
+    records: records0,
+    width: 560,
+    height: Math.round(Math.max(420, (window.innerHeight || 700) * 0.78)),
+  })
+  if (!win) return
+  // Pre-resolve link cards inside this chat history so they render like WeChat (source/app name, etc).
+  try { resolveChatHistoryLinkRecords(win) } catch {}
+  // Root chatHistory messages usually carry the full recordItem already; no further resolve here.
+}
+
+const openNestedChatHistory = (rec) => {
+  if (!process.client) return
+  const title0 = String(rec?.title || '聊天记录')
+  const content0 = String(rec?.content || '')
+  const recordItem0 = String(rec?.recordItem || '').trim()
+  const sid = String(rec?.fromnewmsgid || '').trim()
+
+  const { info0, records0 } = buildChatHistoryWindowPayload({ title: title0, content: content0, recordItem: recordItem0 })
+  const win = openFloatingWindow({
+    kind: 'chatHistory',
+    title: title0 || '聊天记录',
+    info: info0,
+    records: records0,
+    width: 560,
+    height: Math.round(Math.max(420, (window.innerHeight || 700) * 0.78)),
+    loading: false,
+  })
+  if (!win) return
+  try { resolveChatHistoryLinkRecords(win) } catch {}
+
+  if (!sid) return
+  if (!selectedAccount.value) return
+  if (rec && rec._nestedResolving) return
+
+  if (!isChatHistoryRecordItemIncomplete(recordItem0)) return
+  rec._nestedResolving = true
+  win.loading = true
+
+  ;(async () => {
+    try {
+      const api = useApi()
+      const resp = await api.resolveNestedChatHistory({
+        account: selectedAccount.value,
+        server_id: sid,
+      })
+      const resolved = String(resp?.recordItem || '').trim()
+      if (!resolved) return
+      win.title = String(resp?.title || title0 || '聊天记录')
+      const parsed = parseChatHistoryRecord(resolved)
+      win.info = parsed?.info || { isChatRoom: false, count: 0 }
+      const items = Array.isArray(parsed?.items) ? parsed.items : []
+      win.records = items.length ? enhanceChatHistoryRecords(items.map(normalizeChatHistoryRecordItem)) : []
+      if (!win.records.length) {
+        const lines = String(resp?.content || content0 || '').trim().split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+        win.info = { isChatRoom: false, count: 0 }
+        win.records = lines.map((line, idx) => normalizeChatHistoryRecordItem({ id: String(idx), datatype: '1', sourcename: '', sourcetime: '', content: line, renderType: 'text' }))
+      }
+      try { resolveChatHistoryLinkRecords(win) } catch {}
+    } catch {}
+    finally {
+      win.loading = false
+      try { rec._nestedResolving = false } catch {}
+    }
+  })()
+}
+
+const getChatHistoryLinkFromText = (rec) => {
+  const from0 = String(rec?.from || '').trim()
+  if (from0) return from0
+  const u = String(rec?.url || '').trim()
+  if (!u) return ''
+  try { return new URL(u).hostname || '' } catch { return '' }
+}
+
+const getChatHistoryLinkFromAvatarText = (rec) => {
+  const t = String(getChatHistoryLinkFromText(rec) || '').trim()
+  return t ? (Array.from(t)[0] || '') : ''
+}
+
+const openUrlInBrowser = (url) => {
+  const u = String(url || '').trim()
+  if (!u) return
+  try { window.open(u, '_blank', 'noopener,noreferrer') } catch {}
+}
+
+const resolveChatHistoryLinkRecord = async (rec) => {
+  if (!process.client) return null
+  if (!rec) return null
+  if (!selectedAccount.value) return null
+  const sid = String(rec?.fromnewmsgid || '').trim()
+  if (!sid) return null
+  if (rec._linkResolving) return null
+  rec._linkResolving = true
+  try {
+    const api = useApi()
+    const resp = await api.resolveAppMsg({
+      account: selectedAccount.value,
+      server_id: sid,
+    })
+    if (resp && typeof resp === 'object') {
+      const title = String(resp.title || '').trim()
+      const content = String(resp.content || '').trim()
+      const url = String(resp.url || '').trim()
+      const from = String(resp.from || '').trim()
+      const mediaBase = process.client ? 'http://localhost:8000' : ''
+      const normalizePreviewUrl = (u) => {
+        const raw = String(u || '').trim()
+        if (!raw) return ''
+        if (/^\/api\/chat\/media\//i.test(raw) || /^blob:/i.test(raw) || /^data:/i.test(raw)) return raw
+        if (!/^https?:\/\//i.test(raw)) return ''
+        try {
+          const host = new URL(raw).hostname.toLowerCase()
+          if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
+            return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+          }
+        } catch {}
+        return raw
+      }
+      if (title) rec.title = title
+      if (content && !stripWeChatInvisible(rec.content)) rec.content = content
+      if (url) rec.url = url
+      if (from) rec.from = from
+      if (resp.linkStyle) rec.linkStyle = String(resp.linkStyle || '').trim()
+      if (resp.linkType) rec.linkType = String(resp.linkType || '').trim()
+
+      const fromUsername = String(resp.fromUsername || '').trim()
+      if (fromUsername) rec.fromUsername = fromUsername
+      const fromAvatarUrl = fromUsername
+        ? `${mediaBase}/api/chat/avatar?account=${encodeURIComponent(selectedAccount.value || '')}&username=${encodeURIComponent(fromUsername)}`
+        : (url ? `${mediaBase}/api/chat/media/favicon?url=${encodeURIComponent(url)}` : '')
+      if (fromAvatarUrl) {
+        const last = String(rec._fromAvatarLast || '').trim()
+        rec.fromAvatar = fromAvatarUrl
+        if (String(fromAvatarUrl).trim() !== last) {
+          rec._fromAvatarLast = String(fromAvatarUrl).trim()
+          rec._fromAvatarImgOk = false
+          rec._fromAvatarImgError = false
+        }
+      }
+
+      const style0 = String(resp.linkStyle || '').trim()
+      const thumb0 = String(resp.thumbUrl || '').trim()
+      const cover0 = String(resp.coverUrl || '').trim()
+      const picked = style0 === 'cover' ? (cover0 || thumb0) : (thumb0 || cover0)
+      const previewResolved = normalizePreviewUrl(picked)
+      if (previewResolved) {
+        const curPreview = String(rec.preview || '').trim()
+        const candidates0 = Array.isArray(rec._linkPreviewCandidates) ? rec._linkPreviewCandidates.slice() : []
+        if (curPreview && !candidates0.includes(curPreview)) candidates0.push(curPreview)
+        if (!candidates0.includes(previewResolved)) candidates0.push(previewResolved)
+        rec._linkPreviewCandidates = candidates0
+        if (!curPreview || rec._linkPreviewError) {
+          rec.preview = previewResolved
+          rec._linkPreviewCandidateIndex = candidates0.indexOf(previewResolved)
+          rec._linkPreviewError = false
+        }
+      }
+      return resp
+    }
+  } catch {}
+  finally {
+    try { rec._linkResolving = false } catch {}
+  }
+  return null
+}
+
+const resolveChatHistoryLinkRecords = (win) => {
+  if (!process.client) return
+  const records = Array.isArray(win?.records) ? win.records : []
+  const targets = records.filter((r) => {
+    if (!r) return false
+    if (String(r.renderType || '') !== 'link') return false
+    if (!String(r.fromnewmsgid || '').trim()) return false
+    const fromMissing = String(r.from || '').trim() === ''
+    const previewMissing = !String(r.preview || '').trim()
+    const urlMissing = !String(r.url || '').trim()
+    const fromAvatarMissing = !String(r.fromAvatar || '').trim()
+    return fromMissing || previewMissing || urlMissing || fromAvatarMissing
+  })
+  if (!targets.length) return
+  // Resolve sequentially to avoid spamming the backend.
+  ;(async () => {
+    for (const r of targets.slice(0, 12)) {
+      await resolveChatHistoryLinkRecord(r)
+    }
+  })()
+}
+
+const openChatHistoryLinkWindow = (rec) => {
+  if (!process.client) return
+  const title0 = String(rec?.title || rec?.content || '链接').trim()
+  const url0 = String(rec?.url || '').trim()
+  const preview0 = String(rec?.preview || '').trim()
+  const from0 = String(rec?.from || '').trim()
+  const fromAvatar0 = String(rec?.fromAvatar || '').trim()
+  const needResolve = !!String(rec?.fromnewmsgid || '').trim() && (!url0 || !from0 || !preview0 || !fromAvatar0)
+  const win = openFloatingWindow({
+    kind: 'link',
+    title: title0 || '链接',
+    url: url0,
+    content: String(rec?.content || '').trim(),
+    preview: preview0,
+    from: from0,
+    fromAvatar: fromAvatar0,
+    width: 520,
+    height: 420,
+    loading: needResolve,
+  })
+  if (!win) return
+  focusFloatingWindow(win.id)
+  try {
+    win._linkPreviewCandidates = Array.isArray(rec?._linkPreviewCandidates) ? rec._linkPreviewCandidates.slice() : (preview0 ? [preview0] : [])
+    win._linkPreviewCandidateIndex = Math.max(0, Number(rec?._linkPreviewCandidateIndex || 0))
+    win._linkPreviewError = false
+  } catch {}
+  try {
+    win._fromAvatarLast = fromAvatar0
+    win._fromAvatarImgOk = false
+    win._fromAvatarImgError = false
+  } catch {}
+
+  if (needResolve) {
+    // Fill missing fields lazily so the card footer matches WeChat.
+    ;(async () => {
+      const resp = await resolveChatHistoryLinkRecord(rec)
+      if (resp && win) {
+        win.title = String(rec?.title || title0 || '链接').trim()
+        win.url = String(rec?.url || url0 || '').trim()
+        win.content = String(rec?.content || '').trim()
+        win.from = String(rec?.from || '').trim()
+        const nextPreview = String(rec?.preview || '').trim()
+        if (nextPreview) win.preview = nextPreview
+        const nextFromAvatar = String(rec?.fromAvatar || '').trim()
+        if (nextFromAvatar) {
+          win.fromAvatar = nextFromAvatar
+          win._fromAvatarLast = nextFromAvatar
+          win._fromAvatarImgOk = false
+          win._fromAvatarImgError = false
+        }
+        try {
+          win._linkPreviewCandidates = Array.isArray(rec?._linkPreviewCandidates) ? rec._linkPreviewCandidates.slice() : (win.preview ? [win.preview] : [])
+          win._linkPreviewCandidateIndex = Math.max(0, Number(rec?._linkPreviewCandidateIndex || 0))
+          win._linkPreviewError = false
+        } catch {}
+      }
+      if (win) win.loading = false
+    })()
+  } else {
+    win.loading = false
+  }
 }
 
 const onGlobalClick = (e) => {
@@ -5177,6 +7350,7 @@ const onGlobalClick = (e) => {
 }
 
 const openMessageSearch = async () => {
+  closeTimeSidebar()
   messageSearchOpen.value = true
   ensureMessageSearchScopeValid()
   await nextTick()
@@ -5201,6 +7375,7 @@ const onGlobalKeyDown = (e) => {
   if (key === 'Escape') {
     if (contextMenu.value.visible) closeContextMenu()
     if (previewImageUrl.value) closeImagePreview()
+    if (Array.isArray(floatingWindows.value) && floatingWindows.value.length) closeTopFloatingWindow()
     if (chatHistoryModalVisible.value) closeChatHistoryModal()
     if (contactProfileCardOpen.value) {
       clearContactProfileHoverHideTimer()
@@ -5208,6 +7383,7 @@ const onGlobalKeyDown = (e) => {
     }
     if (messageSearchSenderDropdownOpen.value) closeMessageSearchSenderDropdown()
     if (messageSearchOpen.value) closeMessageSearch()
+    if (timeSidebarOpen.value) closeTimeSidebar()
     if (searchContext.value?.active) exitSearchContext()
   }
 }
@@ -5216,12 +7392,22 @@ onMounted(() => {
   if (!process.client) return
   document.addEventListener('click', onGlobalClick)
   document.addEventListener('keydown', onGlobalKeyDown)
+  document.addEventListener('mousemove', onFloatingWindowMouseMove)
+  document.addEventListener('mouseup', onFloatingWindowMouseUp)
+  document.addEventListener('touchmove', onFloatingWindowMouseMove)
+  document.addEventListener('touchend', onFloatingWindowMouseUp)
+  document.addEventListener('touchcancel', onFloatingWindowMouseUp)
 })
 
 onUnmounted(() => {
   if (!process.client) return
   document.removeEventListener('click', onGlobalClick)
   document.removeEventListener('keydown', onGlobalKeyDown)
+  document.removeEventListener('mousemove', onFloatingWindowMouseMove)
+  document.removeEventListener('mouseup', onFloatingWindowMouseUp)
+  document.removeEventListener('touchmove', onFloatingWindowMouseMove)
+  document.removeEventListener('touchend', onFloatingWindowMouseUp)
+  document.removeEventListener('touchcancel', onFloatingWindowMouseUp)
   clearContactProfileHoverHideTimer()
   stopSessionListResize()
   if (messageSearchDebounceTimer) clearTimeout(messageSearchDebounceTimer)
@@ -5230,7 +7416,6 @@ onUnmounted(() => {
   highlightMessageTimer = null
   stopMessageSearchIndexPolling()
   stopExportPolling()
-  stopRealtimeStream()
 })
 
 const dedupeMessagesById = (list) => {
@@ -5347,46 +7532,6 @@ const refreshSelectedMessages = async () => {
   await loadMessages({ username: selectedContact.value.username, reset: true })
 }
 
-const fetchRealtimeStatus = async () => {
-  if (!process.client) return
-  if (!selectedAccount.value) {
-    realtimeAvailable.value = false
-    realtimeStatusInfo.value = null
-    realtimeStatusError.value = ''
-    return
-  }
-
-  const api = useApi()
-  realtimeChecking.value = true
-  try {
-    const resp = await api.getChatRealtimeStatus({ account: selectedAccount.value })
-    realtimeAvailable.value = !!resp?.available
-    realtimeStatusInfo.value = resp?.realtime || null
-    realtimeStatusError.value = ''
-  } catch (e) {
-    realtimeAvailable.value = false
-    realtimeStatusInfo.value = null
-    realtimeStatusError.value = e?.message || '实时状态获取失败'
-  } finally {
-    realtimeChecking.value = false
-  }
-}
-
-const stopRealtimeStream = () => {
-  if (realtimeEventSource) {
-    try {
-      realtimeEventSource.close()
-    } catch {}
-    realtimeEventSource = null
-  }
-  if (realtimeChangeDebounceTimer) {
-    try {
-      clearTimeout(realtimeChangeDebounceTimer)
-    } catch {}
-    realtimeChangeDebounceTimer = null
-  }
-}
-
 const refreshRealtimeIncremental = async () => {
   if (!realtimeEnabled.value) return
   if (!selectedAccount.value) return
@@ -5458,114 +7603,45 @@ const queueRealtimeRefresh = () => {
   })
 }
 
-const queueRealtimeChange = () => {
-  if (!process.client || typeof window === 'undefined') return
-  if (!realtimeEnabled.value) return
-  if (realtimeChangeDebounceTimer) return
-
-  // Debounce noisy db_storage change events to avoid hammering the backend.
-  realtimeChangeDebounceTimer = setTimeout(() => {
-    realtimeChangeDebounceTimer = null
-    queueRealtimeRefresh()
-    queueRealtimeSessionsRefresh()
-  }, 500)
-}
-
-const startRealtimeStream = () => {
-  stopRealtimeStream()
-  if (!process.client || typeof window === 'undefined') return
-  if (!realtimeEnabled.value) return
-  if (!selectedAccount.value) return
-  if (typeof EventSource === 'undefined') return
-
-  const base = 'http://localhost:8000'
-  const url = `${base}/api/chat/realtime/stream?account=${encodeURIComponent(String(selectedAccount.value))}`
-  try {
-    realtimeEventSource = new EventSource(url)
-  } catch (e) {
-    realtimeEventSource = null
-    return
-  }
-
-  realtimeEventSource.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(String(ev.data || '{}'))
-      if (String(data?.type || '') === 'change') {
-        queueRealtimeChange()
-      }
-    } catch {}
-  }
-
-  realtimeEventSource.onerror = () => {
-    stopRealtimeStream()
-  }
-}
-
-const toggleRealtime = async (opts = {}) => {
-  const silent = !!opts?.silent
-  if (!process.client || typeof window === 'undefined') return
-  if (!selectedAccount.value) return
-
-  if (!realtimeEnabled.value) {
-    await fetchRealtimeStatus()
-    if (!realtimeAvailable.value) {
-      if (!silent) {
-        window.alert(realtimeStatusError.value || '实时模式不可用：缺少密钥或 db_storage 路径。')
-      }
-      return false
-    }
-    realtimeEnabled.value = true
-    startRealtimeStream()
-    queueRealtimeSessionsRefresh()
-    if (selectedContact.value?.username) {
-      await refreshSelectedMessages()
-    }
-    return true
-  }
-
-  // Turning off realtime: sync the latest WCDB rows into the decrypted sqlite DB first,
-  // otherwise the UI will fall back to an outdated decrypted snapshot.
-  realtimeEnabled.value = false
-  stopRealtimeStream()
-  try {
-    const api = useApi()
-    const u = String(selectedContact.value?.username || '').trim()
-    // Sync all sessions once before falling back to the decrypted snapshot.
-    // This keeps the sidebar session list consistent (e.g. new friends) after a refresh.
-    await api.syncChatRealtimeAll({
-      account: selectedAccount.value,
-      max_scan: 200,
-      priority_username: u,
-      priority_max_scan: 5000,
-      include_hidden: true,
-      include_official: true
-    })
-  } catch {}
-  await refreshSessionsForSelectedAccount({ sourceOverride: '' })
-  if (selectedContact.value?.username) {
-    await refreshSelectedMessages()
-  }
-  return true
-}
-
 const tryEnableRealtimeAuto = async () => {
   if (!process.client || typeof window === 'undefined') return
-  if (!isDesktopEnv.value) return
   if (!desktopAutoRealtime.value) return
   if (realtimeEnabled.value) return
   if (!selectedAccount.value) return
 
   try {
-    await toggleRealtime({ silent: true })
+    await realtimeStore.enable({ silent: true })
   } catch {}
 }
 
-watch(selectedAccount, async () => {
-  await fetchRealtimeStatus()
-  if (realtimeEnabled.value) {
-    startRealtimeStream()
+watch(realtimeChangeSeq, () => {
+  queueRealtimeRefresh()
+  queueRealtimeSessionsRefresh()
+})
+
+watch(realtimeToggleSeq, async () => {
+  const action = String(realtimeLastToggleAction.value || '')
+  if (action === 'enabled') {
+    await refreshSessionsForSelectedAccount({ sourceOverride: 'realtime' })
+    if (selectedContact.value?.username) {
+      await refreshSelectedMessages()
+    }
+    return
+  }
+  if (action === 'disabled') {
+    await refreshSessionsForSelectedAccount({ sourceOverride: '' })
+    if (selectedContact.value?.username) {
+      await refreshSelectedMessages()
+    }
   }
 })
+
+watch(
+  () => selectedContact.value?.username,
+  (u) => {
+    realtimeStore.setPriorityUsername(u || '')
+  }
+)
 
 watch(messageTypeFilter, async (next, prev) => {
   if (String(next || '') === String(prev || '')) return
@@ -5676,12 +7752,82 @@ watch(
 
 const autoLoadReady = ref(true)
 
+let timeSidebarScrollSyncRaf = null
+const syncTimeSidebarSelectedDateFromScroll = () => {
+  if (!process.client) return
+  if (!timeSidebarOpen.value) return
+  if (!selectedContact.value) return
+
+  const c = messageContainerRef.value
+  if (!c) return
+
+  if (timeSidebarScrollSyncRaf) return
+  timeSidebarScrollSyncRaf = requestAnimationFrame(() => {
+    timeSidebarScrollSyncRaf = null
+    try {
+      const containerRect = c.getBoundingClientRect()
+      const targetY = containerRect.top + 24
+      const els = c.querySelectorAll?.('[data-msg-id][data-create-time]') || []
+      if (!els || !els.length) return
+
+      let chosen = null
+      for (const el of els) {
+        const r = el.getBoundingClientRect?.()
+        if (!r) continue
+        if (r.bottom >= targetY) {
+          chosen = el
+          break
+        }
+      }
+      if (!chosen) chosen = els[els.length - 1]
+      const ts = Number(chosen?.getAttribute?.('data-create-time') || 0)
+      const ds = _dateStrFromEpochSeconds(ts)
+      if (!ds) return
+      // Don't await inside rAF; keep scroll handler snappy.
+      _applyTimeSidebarSelectedDate(ds, { syncMonth: true })
+    } catch {}
+  })
+}
+
+const contextAutoLoadTopReady = ref(true)
+const contextAutoLoadBottomReady = ref(true)
+
+const onMessageScrollInContextMode = async () => {
+  const c = messageContainerRef.value
+  if (!c) return
+  if (!searchContext.value?.active) return
+
+  const distBottom = c.scrollHeight - c.scrollTop - c.clientHeight
+
+  // Reset "ready" gates when user scrolls away from edges.
+  if (c.scrollTop > 160) contextAutoLoadTopReady.value = true
+  if (distBottom > 160) contextAutoLoadBottomReady.value = true
+
+  if (c.scrollTop <= 60 && contextAutoLoadTopReady.value && searchContext.value.hasMoreBefore && !searchContext.value.loadingBefore) {
+    contextAutoLoadTopReady.value = false
+    await loadMoreSearchContextBefore()
+    return
+  }
+
+  if (distBottom <= 80 && contextAutoLoadBottomReady.value && searchContext.value.hasMoreAfter && !searchContext.value.loadingAfter) {
+    contextAutoLoadBottomReady.value = false
+    await loadMoreSearchContextAfter()
+  }
+}
+
 const onMessageScroll = async () => {
   const c = messageContainerRef.value
   if (!c) return
   updateJumpToBottomState()
   if (!selectedContact.value) return
-  if (searchContext.value?.active) return
+
+  // Keep the time sidebar selection in sync with the current viewport.
+  syncTimeSidebarSelectedDateFromScroll()
+
+  if (searchContext.value?.active) {
+    await onMessageScrollInContextMode()
+    return
+  }
 
   if (c.scrollTop > 120) {
     autoLoadReady.value = true
@@ -5703,9 +7849,14 @@ const LinkCard = defineComponent({
     preview: { type: String, default: '' },
     fromAvatar: { type: String, default: '' },
     from: { type: String, default: '' },
-    isSent: { type: Boolean, default: false }
+    isSent: { type: Boolean, default: false },
+    variant: { type: String, default: 'default' }
   },
   setup(props) {
+    const fromAvatarImgOk = ref(false)
+    const fromAvatarImgError = ref(false)
+    const lastFromAvatarUrl = ref('')
+
     const getFromText = () => {
       const raw = String(props.from || '').trim()
       if (raw) return raw
@@ -5728,6 +7879,90 @@ const LinkCard = defineComponent({
         return t ? (Array.from(t)[0] || '') : ''
       })()
       const fromAvatarUrl = String(props.fromAvatar || '').trim()
+      const isCoverVariant = String(props.variant || '').trim() === 'cover'
+
+      // Props may change when switching accounts/chats; reset load state per URL.
+      if (fromAvatarUrl !== lastFromAvatarUrl.value) {
+        lastFromAvatarUrl.value = fromAvatarUrl
+        fromAvatarImgOk.value = false
+        fromAvatarImgError.value = false
+      }
+
+      const showFromAvatarImg = Boolean(fromAvatarUrl) && !fromAvatarImgError.value
+      const showFromAvatarText = (!fromAvatarUrl) || (!fromAvatarImgOk.value)
+      const fromAvatarStyle = fromAvatarImgOk.value
+        ? {
+            background: isCoverVariant ? 'rgba(255, 255, 255, 0.92)' : '#fff',
+            color: 'transparent'
+          }
+        : null
+      const onFromAvatarLoad = () => {
+        fromAvatarImgOk.value = true
+        fromAvatarImgError.value = false
+      }
+      const onFromAvatarError = () => {
+        fromAvatarImgOk.value = false
+        fromAvatarImgError.value = true
+      }
+
+      if (isCoverVariant) {
+        const fromRow = h('div', { class: 'wechat-link-cover-from' }, [
+          h('div', { class: 'wechat-link-cover-from-avatar', style: fromAvatarStyle, 'aria-hidden': 'true' }, [
+            showFromAvatarText ? (fromAvatarText || '\u200B') : null,
+            showFromAvatarImg ? h('img', {
+              src: fromAvatarUrl,
+              alt: '',
+              class: 'wechat-link-cover-from-avatar-img',
+              referrerpolicy: 'no-referrer',
+              onLoad: onFromAvatarLoad,
+              onError: onFromAvatarError
+            }) : null
+          ].filter(Boolean)),
+          h('div', { class: 'wechat-link-cover-from-name' }, fromText || '\u200B')
+        ])
+
+        return h(
+          'a',
+          {
+            href: props.href,
+            target: '_blank',
+            rel: 'noreferrer',
+            class: [
+              'wechat-link-card-cover',
+              'wechat-special-card',
+              'msg-radius',
+              props.isSent ? 'wechat-special-sent-side' : ''
+            ].filter(Boolean).join(' '),
+            style: {
+              width: '137px',
+              minWidth: '137px',
+              maxWidth: '137px',
+              display: 'flex',
+              flexDirection: 'column',
+              boxSizing: 'border-box',
+              flex: '0 0 auto',
+              background: '#fff',
+              border: 'none',
+              boxShadow: 'none',
+              textDecoration: 'none',
+              outline: 'none'
+            }
+          },
+          [
+            props.preview ? h('div', { class: 'wechat-link-cover-image-wrap' }, [
+              h('img', {
+                src: props.preview,
+                alt: props.heading || '链接封面',
+                class: 'wechat-link-cover-image',
+                referrerpolicy: 'no-referrer'
+              }),
+              fromRow,
+            ]) : fromRow,
+            h('div', { class: 'wechat-link-cover-title' }, props.heading || props.href)
+          ].filter(Boolean)
+        )
+      }
+
       return h(
         'a',
         {
@@ -5769,14 +8004,15 @@ const LinkCard = defineComponent({
             ]) : null
           ].filter(Boolean)),
           h('div', { class: 'wechat-link-from' }, [
-            h('div', { class: 'wechat-link-from-avatar', 'aria-hidden': 'true' }, [
-              fromAvatarText || '\u200B',
-              fromAvatarUrl ? h('img', {
+            h('div', { class: 'wechat-link-from-avatar', style: fromAvatarStyle, 'aria-hidden': 'true' }, [
+              showFromAvatarText ? (fromAvatarText || '\u200B') : null,
+              showFromAvatarImg ? h('img', {
                 src: fromAvatarUrl,
                 alt: '',
                 class: 'wechat-link-from-avatar-img',
                 referrerpolicy: 'no-referrer',
-                onError: (e) => { try { e?.target && (e.target.style.display = 'none') } catch {} }
+                onLoad: onFromAvatarLoad,
+                onError: onFromAvatarError
               }) : null
             ].filter(Boolean)),
             h('div', { class: 'wechat-link-from-name' }, fromText || '\u200B')
@@ -6302,11 +8538,11 @@ const LinkCard = defineComponent({
 
 /* 已领取的转账样式 */
 .wechat-transfer-received {
-  background: #f8e2c6;
+  background: #FDCE9D;
 }
 
 .wechat-transfer-received::after {
-  background: #f8e2c6;
+  background: #FDCE9D;
 }
 
 .wechat-transfer-received .wechat-transfer-amount,
@@ -6333,6 +8569,24 @@ const LinkCard = defineComponent({
 }
 
 .wechat-transfer-returned .wechat-transfer-bottom span {
+  color: #fff;
+}
+
+/* 过期的转账样式 */
+.wechat-transfer-overdue {
+  background: #E9CFB3;
+}
+
+.wechat-transfer-overdue::after {
+  background: #E9CFB3;
+}
+
+.wechat-transfer-overdue .wechat-transfer-amount,
+.wechat-transfer-overdue .wechat-transfer-status {
+  color: #fff;
+}
+
+.wechat-transfer-overdue .wechat-transfer-bottom span {
   color: #fff;
 }
 
@@ -6628,6 +8882,111 @@ const LinkCard = defineComponent({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 链接封面卡片（170x230 图 + 60 底栏） */
+:deep(.wechat-link-card-cover) {
+  width: 137px;
+  min-width: 137px;
+  max-width: 137px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+:deep(.wechat-link-card-cover:hover) {
+  background: #f5f5f5;
+}
+
+:deep(.wechat-link-cover-image-wrap) {
+  width: 137px;
+  height: 180px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 4px 4px 0 0;
+  background: #f2f2f2;
+  flex-shrink: 0;
+}
+
+:deep(.wechat-link-cover-image) {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+
+/* 仅公众号封面卡片去掉菱形尖角，其它消息保持原样 */
+:deep(.wechat-link-card-cover.wechat-special-card)::after {
+  content: none !important;
+}
+
+:deep(.wechat-link-cover-from) {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+:deep(.wechat-link-cover-from-avatar) {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #111;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+:deep(.wechat-link-cover-from-avatar-img) {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+:deep(.wechat-link-cover-from-name) {
+  font-size: 12px;
+  color: #f3f3f3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:deep(.wechat-link-cover-title) {
+  height: 50px;
+  padding: 7px 10px 0;
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1.24;
+  color: #1a1a1a;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  flex-shrink: 0;
 }
 
 /* 隐私模式模糊效果 */

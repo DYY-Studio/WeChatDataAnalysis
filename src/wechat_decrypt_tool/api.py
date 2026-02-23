@@ -5,10 +5,12 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
+from . import __version__ as APP_VERSION
 from .logging_config import setup_logging, get_logger
 from .path_fix import PathFixRoute
 from .chat_realtime_autosync import CHAT_REALTIME_AUTOSYNC
@@ -21,8 +23,10 @@ from .routers.health import router as _health_router
 from .routers.keys import router as _keys_router
 from .routers.media import router as _media_router
 from .routers.sns import router as _sns_router
+from .routers.sns_export import router as _sns_export_router
 from .routers.wechat_detection import router as _wechat_detection_router
 from .routers.wrapped import router as _wrapped_router
+from .sns_stage_timing import add_sns_stage_timing_headers
 from .wcdb_realtime import WCDB_REALTIME, shutdown as _wcdb_shutdown
 
 # 初始化日志系统
@@ -32,7 +36,7 @@ logger = get_logger(__name__)
 app = FastAPI(
     title="微信数据库解密工具",
     description="现代化的微信数据库解密工具，支持微信信息检测和数据库解密功能",
-    version="0.1.0",
+    version=APP_VERSION,
 )
 
 # 设置自定义路由类
@@ -45,7 +49,30 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-SNS-Source", "X-SNS-Hit-Type", "X-SNS-X-Enc"],
 )
+
+
+@app.middleware("http")
+async def _add_sns_stage_timing_headers(request: Request, call_next):
+    """Expose SNS stage metadata to the frontend without extra requests.
+
+    `<img>` elements can't read response headers, but browsers can surface `Server-Timing`
+    via `performance.getEntriesByName(...).serverTiming` when `Timing-Allow-Origin` is set.
+    """
+
+    response = await call_next(request)
+    try:
+        add_sns_stage_timing_headers(
+            response.headers,
+            source=str(response.headers.get("X-SNS-Source") or ""),
+            hit_type=str(response.headers.get("X-SNS-Hit-Type") or ""),
+            x_enc=str(response.headers.get("X-SNS-X-Enc") or ""),
+        )
+    except Exception:
+        pass
+    return response
+
 
 app.include_router(_health_router)
 app.include_router(_wechat_detection_router)
@@ -57,6 +84,7 @@ app.include_router(_chat_contacts_router)
 app.include_router(_chat_export_router)
 app.include_router(_chat_media_router)
 app.include_router(_sns_router)
+app.include_router(_sns_export_router)
 app.include_router(_wrapped_router)
 
 

@@ -95,7 +95,7 @@
 
     <!-- 主内容：抽奖揭晓 + 右侧年度 Top10 总消息 bar race -->
     <div v-else class="w-full">
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center" :class="isRetro ? 'lg:items-start' : ''">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
         <!-- Left: 抽奖区 -->
         <div
           class="reply-buddy-rail flex flex-col items-center justify-center transition-transform duration-500 will-change-transform"
@@ -104,8 +104,7 @@
           <div class="wrapped-label text-xs text-[#00000066]">最佳聊天搭子</div>
 
           <div
-            class="mt-4 w-28 h-28 sm:w-32 sm:h-32 rounded-2xl border border-[#EDEDED] overflow-hidden flex items-center justify-center"
-            :class="isRetro ? 'bg-transparent' : 'bg-white/60'"
+            class="mt-4 w-28 h-28 sm:w-32 sm:h-32 rounded-2xl border border-[#EDEDED] bg-white/60 overflow-hidden flex items-center justify-center"
           >
             <img
               v-if="shownAvatarUrl && shownAvatarOk"
@@ -115,7 +114,7 @@
               @error="onShownAvatarError"
             />
             <img
-              v-else-if="isGameboy && phase === 'idle'"
+              v-else-if="phase === 'idle'"
               src="/assets/images/LuckyBlock.png"
               class="w-full h-full object-contain"
               alt="Lucky Block"
@@ -167,18 +166,27 @@
 
         <!-- Right: bar race（揭晓后出现） -->
         <Transition name="chart-fade">
-          <div v-if="showChart" class="w-full" :class="isRetro ? 'lg:self-start' : ''">
+          <div v-if="showChart" class="w-full">
             <div
-              class="rounded-2xl border border-[#EDEDED] bg-white/60"
-              :class="isRetro ? 'p-3 sm:p-4' : 'p-4 sm:p-5'"
+              class="rounded-2xl border border-[#EDEDED] bg-white/60 p-4 sm:p-5"
             >
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="wrapped-label text-xs text-[#00000066]">年度聊天排行（总消息数）</div>
-                  <div class="wrapped-body text-sm text-[#000000e6]" :class="isRetro ? 'mt-0.5' : 'mt-1'">
+                  <div class="wrapped-label text-xs text-[#00000066]">年度聊天排行（我发 + 对方）</div>
+                  <div class="wrapped-body text-sm text-[#000000e6] mt-1">
                     <span class="wrapped-number text-[#07C160] font-semibold">{{ raceDate }}</span>
                     <span class="text-[#00000055]"> · 0.1秒/天</span>
                   </div>
+                </div>
+                <div class="flex items-center gap-3 text-[11px] text-[#00000066] shrink-0">
+                  <span class="inline-flex items-center gap-1">
+                    <span class="w-2 h-2 rounded-full bg-[#07C160]"></span>
+                    我发
+                  </span>
+                  <span class="inline-flex items-center gap-1">
+                    <span class="w-2 h-2 rounded-full bg-[#F2AA00]"></span>
+                    对方
+                  </span>
                 </div>
               </div>
 
@@ -190,21 +198,19 @@
                 <TransitionGroup
                   name="race"
                   tag="div"
-                  :class="isRetro ? 'space-y-1.5' : 'space-y-2'"
+                  class="space-y-2"
                 >
                   <div
                     v-for="item in raceItems"
                     :key="item.username"
-                    class="race-row flex items-center"
-                    :class="isRetro ? 'gap-3' : 'gap-3'"
+                    class="race-row flex items-center gap-3"
                   >
                   <div class="w-6 text-right wrapped-label text-[11px] text-[#00000055]">
                     {{ item.rank }}
                   </div>
 
                   <div
-                    class="rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0"
-                    :class="isRetro ? 'w-6 h-6' : 'w-7 h-7'"
+                    class="w-7 h-7 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0"
                   >
                     <img
                       v-if="item.avatarUrl && avatarOk[item.username] !== false"
@@ -221,19 +227,28 @@
                   <div class="min-w-0 flex-1">
                     <div class="flex items-center justify-between gap-3">
                       <div class="min-w-0">
-                        <div class="wrapped-body text-[#000000e6] truncate" :class="isRetro ? 'text-xs' : 'text-sm'" :title="item.displayName">
+                        <div class="wrapped-body text-[#000000e6] text-sm truncate" :title="item.displayName">
                           {{ item.displayName }}
                         </div>
                       </div>
-                      <div class="wrapped-number text-xs text-[#07C160] font-semibold">
+                      <div class="wrapped-number text-xs text-[#00000080] font-semibold">
                         {{ formatInt(item.value) }}
                       </div>
                     </div>
-                    <div class="mt-1 rounded-full bg-[#00000008] overflow-hidden" :class="isRetro ? 'h-1.5' : 'h-2'">
+                    <div class="mt-1 h-2 rounded-full bg-[#00000008] overflow-hidden">
                       <div
-                        class="race-bar h-full rounded-full bg-[#07C160]"
+                        class="race-bar-fill h-full rounded-full overflow-hidden flex"
                         :style="{ width: `${item.pct}%` }"
-                      />
+                      >
+                        <div
+                          class="race-bar race-bar-outgoing h-full"
+                          :style="{ width: `${item.outgoingPartPct}%` }"
+                        />
+                        <div
+                          class="race-bar race-bar-incoming h-full"
+                          :style="{ width: `${item.incomingPartPct}%` }"
+                        />
+                      </div>
                     </div>
                   </div>
                   </div>
@@ -249,16 +264,11 @@
 
 <script setup>
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { useWrappedTheme } from '~/composables/useWrappedTheme'
 
 const props = defineProps({
   card: { type: Object, required: true },
   variant: { type: String, default: 'panel' } // 'panel' | 'slide'
 })
-
-const { theme } = useWrappedTheme()
-const isGameboy = computed(() => theme.value === 'gameboy')
-const isRetro = computed(() => isGameboy.value)
 
 const nfInt = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 })
 const formatInt = (n) => nfInt.format(Math.round(Number(n) || 0))
@@ -624,16 +634,62 @@ const startTypewriter = () => {
 const race = computed(() => props.card?.data?.race || null)
 const raceDays = computed(() => Math.max(0, Number(race.value?.days || 0)))
 const raceSeriesRaw = computed(() => (Array.isArray(race.value?.series) ? race.value.series : []))
+const topTotalsByUsername = computed(() => {
+  const out = new Map()
+  const arr = Array.isArray(props.card?.data?.topTotals) ? props.card.data.topTotals : []
+  for (const x of arr) {
+    if (!x || typeof x !== 'object') continue
+    const username = String(x.username || '').trim()
+    if (!username) continue
+    out.set(username, {
+      outgoingMessages: Math.max(0, Number(x.outgoingMessages || 0)),
+      incomingMessages: Math.max(0, Number(x.incomingMessages || 0))
+    })
+  }
+  return out
+})
+
 const raceSeries = computed(() => {
   // Pre-resolve avatar URLs once to avoid doing it in tight animation loops.
+  const totalsByUsername = topTotalsByUsername.value
   return raceSeriesRaw.value
     .filter((x) => x && typeof x === 'object' && typeof x.username === 'string')
-    .map((x) => ({
-      username: String(x.username || ''),
-      displayName: String(x.displayName || x.maskedName || ''),
-      avatarUrl: resolveMediaUrl(x.avatarUrl),
-      cumulativeCounts: Array.isArray(x.cumulativeCounts) ? x.cumulativeCounts.map((v) => Number(v) || 0) : []
-    }))
+    .map((x) => {
+      const username = String(x.username || '')
+      const fallback = totalsByUsername.get(username)
+      const outgoingMessages = Math.max(0, Number(x.outgoingMessages ?? fallback?.outgoingMessages ?? 0))
+      const incomingMessages = Math.max(0, Number(x.incomingMessages ?? fallback?.incomingMessages ?? 0))
+
+      let cumulativeCounts = Array.isArray(x.cumulativeCounts) ? x.cumulativeCounts.map((v) => Math.max(0, Number(v) || 0)) : []
+      let cumulativeOutgoingCounts = Array.isArray(x.cumulativeOutgoingCounts) ? x.cumulativeOutgoingCounts.map((v) => Math.max(0, Number(v) || 0)) : []
+      let cumulativeIncomingCounts = Array.isArray(x.cumulativeIncomingCounts) ? x.cumulativeIncomingCounts.map((v) => Math.max(0, Number(v) || 0)) : []
+
+      if (cumulativeCounts.length === 0 && (cumulativeOutgoingCounts.length > 0 || cumulativeIncomingCounts.length > 0)) {
+        const len = Math.max(cumulativeOutgoingCounts.length, cumulativeIncomingCounts.length)
+        cumulativeCounts = Array.from({ length: len }, (_, i) => (
+          Number(cumulativeOutgoingCounts[i] || 0) + Number(cumulativeIncomingCounts[i] || 0)
+        ))
+      }
+
+      // Backward compatibility for old caches: split total curve using final in/out ratio.
+      if (cumulativeCounts.length > 0 && (cumulativeOutgoingCounts.length === 0 || cumulativeIncomingCounts.length === 0)) {
+        const splitBase = outgoingMessages + incomingMessages
+        const outgoingRatio = splitBase > 0 ? outgoingMessages / splitBase : 0
+        cumulativeOutgoingCounts = cumulativeCounts.map((v) => Math.max(0, Math.round((Number(v) || 0) * outgoingRatio)))
+        cumulativeIncomingCounts = cumulativeCounts.map((v, i) => (
+          Math.max(0, (Number(v) || 0) - Number(cumulativeOutgoingCounts[i] || 0))
+        ))
+      }
+
+      return {
+        username,
+        displayName: String(x.displayName || x.maskedName || ''),
+        avatarUrl: resolveMediaUrl(x.avatarUrl),
+        cumulativeCounts,
+        cumulativeOutgoingCounts,
+        cumulativeIncomingCounts
+      }
+    })
 })
 
 const raceDay = ref(0)
@@ -652,21 +708,50 @@ const raceDate = computed(() => {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`
 })
 
+const valueAtRaceStep = (arr, step) => {
+  if (step <= 0 || !Array.isArray(arr) || arr.length === 0) return 0
+  if (step - 1 < arr.length) return Math.max(0, Number(arr[step - 1] || 0))
+  return Math.max(0, Number(arr[arr.length - 1] || 0))
+}
+
 const raceItems = computed(() => {
   const step = Math.max(0, Math.min(Math.max(0, raceDays.value), Number(raceDay.value || 0)))
   const list = raceSeries.value
   if (!Array.isArray(list) || list.length === 0) return []
 
   let items = list.map((s) => {
-    const arr = s.cumulativeCounts
-    const v = step <= 0
-      ? 0
-      : (
-          arr && arr.length > 0
-            ? (step - 1 < arr.length ? Number(arr[step - 1] || 0) : Number(arr[arr.length - 1] || 0))
-            : 0
-        )
-    return { ...s, value: Math.max(0, v) }
+    const totalV = valueAtRaceStep(s.cumulativeCounts, step)
+    let outgoingV = valueAtRaceStep(s.cumulativeOutgoingCounts, step)
+    let incomingV = valueAtRaceStep(s.cumulativeIncomingCounts, step)
+    let value = Math.max(0, totalV)
+    let splitTotal = outgoingV + incomingV
+
+    if (value <= 0 && splitTotal > 0) value = splitTotal
+    if (splitTotal <= 0 && value > 0) {
+      incomingV = value
+      splitTotal = value
+    }
+
+    if (splitTotal > 0 && splitTotal !== value) {
+      const scale = value / splitTotal
+      outgoingV = Math.max(0, Math.round(outgoingV * scale))
+      incomingV = Math.max(0, value - outgoingV)
+      splitTotal = outgoingV + incomingV
+    }
+
+    const outgoingPartPct = splitTotal > 0
+      ? Math.max(0, Math.min(100, Math.round((outgoingV / splitTotal) * 100)))
+      : 0
+    const incomingPartPct = splitTotal > 0 ? 100 - outgoingPartPct : 0
+
+    return {
+      ...s,
+      value,
+      outgoingValue: outgoingV,
+      incomingValue: incomingV,
+      outgoingPartPct,
+      incomingPartPct
+    }
   })
 
   // Hide 0-value rows so the "TOP10" can evolve naturally (people enter/leave the list over time),
@@ -769,7 +854,19 @@ onBeforeUnmount(() => {
   transition: transform 350ms cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
 
+.race-bar-fill {
+  transition: width 120ms linear !important;
+}
+
 .race-bar {
   transition: width 120ms linear !important;
+}
+
+.race-bar-outgoing {
+  background: #07c160;
+}
+
+.race-bar-incoming {
+  background: #f2aa00;
 }
 </style>

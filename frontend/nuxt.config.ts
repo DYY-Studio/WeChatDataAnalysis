@@ -2,6 +2,14 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: false },
+
+  runtimeConfig: {
+    public: {
+      // Full API base, including `/api` when needed.
+      // Example: `NUXT_PUBLIC_API_BASE=http://127.0.0.1:8000/api`
+      apiBase: process.env.NUXT_PUBLIC_API_BASE || '/api',
+    },
+  },
   
   // 配置前端开发服务器端口
   devServer: {
@@ -12,7 +20,9 @@ export default defineNuxtConfig({
   nitro: {
     devProxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // `h3` strips the matched prefix (`/api`) before calling the middleware,
+        // so the proxy target must include `/api` to preserve backend routes.
+        target: 'http://127.0.0.1:8000/api',
         changeOrigin: true
       }
     }
@@ -31,8 +41,7 @@ export default defineNuxtConfig({
         { rel: 'icon', type: 'image/png', href: '/logo.png' },
         { rel: 'stylesheet', href: 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css' }
       ]
-    },
-    pageTransition: { name: 'page', mode: 'out-in' }
+    }
   },
   
   // 模块配置

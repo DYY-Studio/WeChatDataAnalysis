@@ -2,17 +2,35 @@
   <div
     ref="deckEl"
     class="wrapped-deck-root relative h-screen w-full overflow-hidden transition-colors duration-500"
-    :class="themeClass"
     :style="{ backgroundColor: currentBg }"
   >
     <!-- PPT 风格：单张卡片占据全页面，鼠标滚轮切换 -->
     <WrappedDeckBackground />
-    <!-- CRT 叠加层仅用于“像素屏”类主题，Win98 等桌面 GUI 主题不应开启 -->
-    <WrappedCRTOverlay v-if="theme === 'gameboy'" />
 
-    <!-- 左上角：刷新 + 复古模式开关 -->
-    <div class="absolute top-6 left-6 z-20 select-none">
+    <!-- 左上角：返回 + 刷新 -->
+    <div v-show="!deckChromeHidden" class="absolute top-6 left-6 z-20 select-none transition-opacity duration-300">
       <div class="flex items-center gap-3">
+        <button
+          type="button"
+          class="pointer-events-auto inline-flex items-center justify-center w-9 h-9 rounded-full bg-transparent text-[#07C160] hover:bg-[#07C160]/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#07C160]/30 transition"
+          aria-label="返回上一级"
+          title="返回上一级"
+          @click="goBack"
+        >
+          <svg
+            class="w-4 h-4"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+        </button>
+
         <button
           type="button"
           class="pointer-events-auto inline-flex items-center justify-center w-9 h-9 rounded-full bg-transparent text-[#07C160] hover:bg-[#07C160]/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#07C160]/30 disabled:opacity-60 disabled:cursor-not-allowed transition"
@@ -38,24 +56,6 @@
           </svg>
         </button>
 
-        <button
-          type="button"
-          class="pointer-events-auto inline-flex items-center justify-center w-9 h-9 rounded-full bg-transparent transition disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-[#07C160]/30"
-          :class="isRetro ? 'text-[#07C160] hover:bg-[#07C160]/10' : 'text-[#00000055] hover:bg-[#000000]/5'"
-          :aria-pressed="isRetro ? 'true' : 'false'"
-          :aria-label="`复古模式（当前：${theme === 'off' ? 'Modern' : theme.toUpperCase()}）`"
-          :title="`复古模式：${theme === 'off' ? 'Modern' : theme.toUpperCase()}（点击切换）`"
-          @click="cycleTheme"
-        >
-          <img
-            src="/assets/images/wechat-audio-dark.png"
-            class="w-4 h-4 transition"
-            :style="{ filter: isRetro ? 'none' : 'grayscale(1)', opacity: isRetro ? '1' : '0.55' }"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
-        </button>
       </div>
 
       <div v-if="error" class="mt-2 pointer-events-auto bg-white/90 backdrop-blur rounded-xl border border-red-200 px-3 py-2">
@@ -65,9 +65,9 @@
     </div>
 
     <!-- 右上角：年份选择器（主题化） -->
-    <div class="absolute top-6 right-6 z-20 pointer-events-auto select-none">
+    <div v-show="!deckChromeHidden" class="absolute top-6 right-6 z-20 pointer-events-auto select-none transition-opacity duration-300">
       <div class="relative">
-        <div v-if="!isRetro" class="absolute -inset-6 rounded-full bg-[#07C160]/10 blur-2xl"></div>
+        <div class="absolute -inset-6 rounded-full bg-[#07C160]/10 blur-2xl"></div>
         <div class="relative flex justify-end">
           <WrappedYearSelector
             v-if="yearOptions.length > 1"
@@ -76,7 +76,7 @@
           />
           <div v-else class="wrapped-label text-xs text-[#00000066]">{{ year }}年</div>
         </div>
-        <div v-if="!isRetro" class="relative mt-1 h-[1px] w-16 ml-auto bg-gradient-to-l from-[#07C160]/40 to-transparent"></div>
+        <div class="relative mt-1 h-[1px] w-16 ml-auto bg-gradient-to-l from-[#07C160]/40 to-transparent"></div>
       </div>
     </div>
 
@@ -157,8 +157,26 @@
           variant="slide"
           class="h-full w-full"
         />
+        <Card06KeywordsWordCloud
+          v-else-if="c && (c.kind === 'text/keywords_wordcloud' || c.id === 6)"
+          :card="c"
+          variant="slide"
+          class="h-full w-full"
+        />
         <Card03ReplySpeed
           v-else-if="c && (c.kind === 'chat/reply_speed' || c.id === 3)"
+          :card="c"
+          variant="slide"
+          class="h-full w-full"
+        />
+        <Card04MonthlyBestFriendsWall
+          v-else-if="c && (c.kind === 'chat/monthly_best_friends_wall' || c.id === 4)"
+          :card="c"
+          variant="slide"
+          class="h-full w-full"
+        />
+        <Card04EmojiUniverse
+          v-else-if="c && (c.kind === 'emoji/annual_universe' || c.id === 5)"
           :card="c"
           variant="slide"
           class="h-full w-full"
@@ -178,11 +196,6 @@
       </section>
     </div>
 
-    <!-- Win98：底部任务栏 -->
-    <WrappedWin98Taskbar
-      v-if="theme === 'win98'"
-      :title="taskbarTitle"
-    />
   </div>
 </template>
 
@@ -198,12 +211,11 @@ const api = useApi()
 const route = useRoute()
 const router = useRouter()
 
-const year = ref(Number(route.query?.year) || new Date().getFullYear())
+const queryYear = Number(route.query?.year)
+const defaultYear = new Date().getFullYear() - 1
+const year = ref(Number.isFinite(queryYear) ? queryYear : defaultYear)
 // 分享视图不展示账号信息：默认让后端自动选择；需要指定时可用 query ?account=wxid_xxx
 const account = ref(typeof route.query?.account === 'string' ? route.query.account : '')
-
-// 主题管理：modern / gameboy / win98
-const { theme, cycleTheme, isRetro, themeClass } = useWrappedTheme()
 
  const accounts = ref([])
  const accountsLoading = ref(true)
@@ -232,15 +244,13 @@ const viewportHeight = ref(0)
 const activeIndex = ref(0)
 const navLocked = ref(false)
 const wheelAcc = ref(0)
+
+// 允许子卡片隐藏 deck 顶部 UI（如关键词卡片 storm 阶段）
+const deckChromeHidden = ref(false)
+provide('deckChromeHidden', deckChromeHidden)
+
 let navUnlockTimer = null
 let deckResizeObserver = null
-
-// 各主题的背景颜色
-const THEME_BG = {
-  off: '#F3FFF8',       // Modern: 浅绿
-  gameboy: '#9bbc0f',   // Game Boy: 亮绿
-  win98: '#008080'      // Win98: 经典桌面青色
-}
 
 const slides = computed(() => {
   const cards = Array.isArray(report.value?.cards) ? report.value.cards : []
@@ -249,15 +259,7 @@ const slides = computed(() => {
   return out
 })
 
-const taskbarTitle = computed(() => {
-  if (theme.value !== 'win98') return ''
-  if (activeIndex.value === 0) return `${year.value} WeChat Wrapped`
-  const idx = activeIndex.value - 1
-  const c = report.value?.cards?.[idx]
-  return String(c?.title || 'WeChat Wrapped')
-})
-
-const currentBg = computed(() => THEME_BG[theme.value] || THEME_BG.off)
+const currentBg = computed(() => '#F3FFF8')
 const deckTrackClass = computed(() => 'z-10')
 
 const applyViewportBg = () => {
@@ -283,6 +285,10 @@ const clampIndex = (i) => {
 
 const goTo = (i) => {
   activeIndex.value = clampIndex(i)
+}
+
+const goBack = async () => {
+  await router.push('/chat')
 }
 
 const next = () => goTo(activeIndex.value + 1)
@@ -392,11 +398,8 @@ const onTouchEnd = (e) => {
 const updateViewport = () => {
   const h = Math.round(deckEl.value?.getBoundingClientRect?.().height || deckEl.value?.clientHeight || window.innerHeight || 0)
   if (!h) return
-  // Reserve space for the Win98 taskbar at the bottom.
-  const offset = theme.value === 'win98' ? 40 : 0
-  const effective = Math.max(0, h - offset)
   // Avoid endless reflows from 1px rounding errors (especially in Electron).
-  if (Math.abs(viewportHeight.value - effective) > 1) viewportHeight.value = effective
+  if (Math.abs(viewportHeight.value - h) > 1) viewportHeight.value = h
 }
 
 const loadAccounts = async () => {
@@ -475,9 +478,10 @@ const retryCard = async (cardId) => {
   await ensureCardLoaded(cardId)
 }
 
-const reload = async (forceRefresh = false) => {
+const reload = async (forceRefresh = false, preserveIndex = false) => {
   const token = ++reportToken
-  activeIndex.value = 0
+  const keepIndex = preserveIndex ? activeIndex.value : 0
+  if (!preserveIndex) activeIndex.value = 0
   error.value = ''
   loading.value = true
   refreshCards.value = !!forceRefresh
@@ -518,6 +522,15 @@ const reload = async (forceRefresh = false) => {
     }
 
     availableYears.value = Array.isArray(resp?.availableYears) ? resp.availableYears : []
+
+    if (preserveIndex) {
+      activeIndex.value = clampIndex(keepIndex)
+      const cardIdx = Number(activeIndex.value) - 1
+      if (cardIdx >= 0) {
+        const id = Number(report.value?.cards?.[cardIdx]?.id)
+        if (Number.isFinite(id)) void ensureCardLoaded(id)
+      }
+    }
   } catch (e) {
     if (token !== reportToken) return
     report.value = null
@@ -561,12 +574,6 @@ onMounted(async () => {
   }
 })
 
-// Theme switch may change reserved UI space (e.g., Win98 taskbar)
-watch(theme, () => {
-  applyViewportBg()
-  updateViewport()
-})
-
 onBeforeUnmount(() => {
   if (import.meta.client) {
     document.documentElement.style.backgroundColor = ''
@@ -598,7 +605,7 @@ watch(year, async (newYear, oldYear) => {
     year.value = oldYear
     return
   }
-  await reload()
+  await reload(false, true)
 })
 </script>
 

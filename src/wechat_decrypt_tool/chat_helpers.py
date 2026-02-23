@@ -8,7 +8,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import HTTPException
 
@@ -618,6 +618,73 @@ def _normalize_xml_url(url: str) -> str:
         return u.replace("&amp;", "&").strip()
 
 
+def _is_mp_weixin_article_url(url: str) -> bool:
+    u = str(url or "").strip()
+    if not u:
+        return False
+
+    try:
+        host = str(urlparse(u).hostname or "").strip().lower()
+        if host == "mp.weixin.qq.com" or host.endswith(".mp.weixin.qq.com"):
+            return True
+    except Exception:
+        pass
+
+    lu = u.lower()
+    return "mp.weixin.qq.com/" in lu
+
+
+def _is_mp_weixin_feed_article_url(url: str) -> bool:
+    """Detect WeChat's PC feed/recommendation mp.weixin.qq.com share URLs.
+
+    These links often carry an `exptype` like:
+      masonry_feed_brief_content_elite_for_pcfeeds_u2i
+
+    WeChat desktop tends to render them in a cover-card style (image + bottom title),
+    so we use this as a hint to choose the 'cover' linkStyle.
+    """
+
+    u = str(url or "").strip()
+    if not u:
+        return False
+
+    try:
+        parsed = urlparse(u)
+        q = parse_qs(parsed.query or "")
+        for v in (q.get("exptype") or []):
+            if "masonry_feed" in str(v or "").lower():
+                return True
+    except Exception:
+        pass
+
+    return "exptype=masonry_feed" in u.lower()
+
+
+def _classify_link_share(*, app_type: int, url: str, source_username: str, desc: str) -> tuple[str, str]:
+    src = str(source_username or "").strip().lower()
+    is_official_article = bool(
+        app_type in (5, 68)
+        and (_is_mp_weixin_article_url(url) or src.startswith("gh_"))
+    )
+
+    link_type = "official_article" if is_official_article else "web_link"
+
+    d = str(desc or "").strip()
+    hashtag_count = len(re.findall(r"#[^#\s]+", d))
+
+    # 公众号文章中「封面图 + 底栏标题」卡片特征：摘要以 #话题# 风格为主。
+    cover_like = bool(
+        is_official_article
+        and (
+            d.startswith("#")
+            or hashtag_count >= 2
+            or _is_mp_weixin_feed_article_url(url)
+        )
+    )
+    link_style = "cover" if cover_like else "default"
+    return link_type, link_style
+
+
 def _extract_xml_tag_text(xml_text: str, tag: str) -> str:
     if not xml_text or not tag:
         return ""
@@ -645,11 +712,107 @@ def _extract_xml_tag_or_attr(xml_text: str, name: str) -> str:
     return _extract_xml_attr(xml_text, name)
 
 
+def _parse_system_message_content(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return "[系统消息]"
+
+    def _clean_system_text(value: str) -> str:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return ""
+
+        nested_content = _extract_xml_tag_text(candidate, "content")
+        if nested_content:
+            candidate = nested_content
+
+        candidate = re.sub(r"<!\[CDATA\[", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\]\]>", "", candidate)
+        candidate = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        return candidate
+
+    if "revokemsg" in text.lower():
+        replace_msg = _extract_xml_tag_text(text, "replacemsg")
+        cleaned_replace_msg = _clean_system_text(replace_msg)
+        if cleaned_replace_msg:
+            return cleaned_replace_msg
+
+        revoke_msg = _extract_xml_tag_text(text, "revokemsg")
+        cleaned_revoke_msg = _clean_system_text(revoke_msg)
+        if cleaned_revoke_msg:
+            return cleaned_revoke_msg
+
+        return "撤回了一条消息"
+
+    content_text = _clean_system_text(text)
+    return content_text or "[系统消息]"
+
+
 def _extract_refermsg_block(xml_text: str) -> str:
     if not xml_text:
         return ""
     m = re.search(r"(<refermsg[^>]*>.*?</refermsg>)", xml_text, flags=re.IGNORECASE | re.DOTALL)
     return (m.group(1) or "").strip() if m else ""
+
+
+def _extract_refermsg_content(refer_block: str) -> str:
+    if not refer_block:
+        return ""
+
+    cdata_match = re.search(
+        r"<content\b[^>]*>\s*<!\[CDATA\[(.*?)\]\]>\s*</content>",
+        refer_block,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if cdata_match:
+        return str(cdata_match.group(1) or "").strip()
+
+    return _extract_xml_tag_text(refer_block, "content")
+
+
+def _summarize_nested_quote_content(raw_content: str) -> str:
+    candidate = str(raw_content or "").strip()
+    if not candidate:
+        return ""
+
+    lower = candidate.lower()
+    if "<msg" not in lower and "<appmsg" not in lower:
+        return candidate
+
+    for tag in ("title", "des"):
+        value = _extract_xml_tag_text(candidate, tag)
+        if value:
+            return value
+
+    content_value = _extract_xml_tag_text(candidate, "content")
+    if content_value and (not str(content_value).lstrip().startswith("<")):
+        return content_value
+
+    return ""
+
+
+def _extract_nested_quote_thumb_url(raw_content: str) -> str:
+    candidate = str(raw_content or "").strip()
+    if not candidate:
+        return ""
+
+    probes = [candidate]
+
+    if candidate.startswith("wxid_"):
+        colon = candidate.find(":")
+        if 0 < colon <= 64:
+            rest = candidate[colon + 1 :].strip()
+            if rest:
+                probes.append(rest)
+
+    for probe in probes:
+        for key in ("thumburl", "cdnthumburl", "cdnthumurl", "coverurl", "cover"):
+            value = _normalize_xml_url(_extract_xml_tag_or_attr(probe, key))
+            if value:
+                return value
+
+    return ""
 
 
 def _infer_transfer_status_text(
@@ -665,7 +828,7 @@ def _infer_transfer_status_text(
     rs = str(receivestatus or "").strip()
 
     if rs == "1":
-        return "已收款"
+        return "已被接收" if is_sent else "已收款"
     if rs == "2":
         return "已退还"
     if rs == "3":
@@ -681,7 +844,7 @@ def _infer_transfer_status_text(
     if t == "8":
         return "发起转账"
     if t == "3":
-        return "已收款" if is_sent else "已被接收"
+        return "已被接收" if is_sent else "已收款"
     if t == "1":
         return "转账"
 
@@ -733,10 +896,22 @@ def _extract_sender_from_group_xml(xml_text: str) -> str:
     if not xml_text:
         return ""
 
-    v = _extract_xml_tag_text(xml_text, "fromusername")
+    probe_text = xml_text
+    try:
+        # Avoid picking nested quoted-message sender from <refermsg>.
+        probe_text = re.sub(
+            r"(<refermsg[^>]*>.*?</refermsg>)",
+            "",
+            xml_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    except Exception:
+        probe_text = xml_text
+
+    v = _extract_xml_tag_text(probe_text, "fromusername")
     if v:
         return v
-    v = _extract_xml_attr(xml_text, "fromusername")
+    v = _extract_xml_attr(probe_text, "fromusername")
     if v:
         return v
     return ""
@@ -807,8 +982,18 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             "recordItem": record_item or "",
         }
 
-    if app_type in (5, 68) and url:
-        thumb_url = _normalize_xml_url(_extract_xml_tag_text(text, "thumburl"))
+    if app_type in (4, 5, 68) and url:
+        # Many appmsg link cards (notably Bilibili shares with <type>4</type>) include a <patMsg> metadata block.
+        # DO NOT treat "<patmsg" presence as a pat message: it would misclassify normal link cards as "[拍一拍]".
+        thumb_url = _normalize_xml_url(
+            _extract_xml_tag_text(text, "thumburl") or _extract_xml_tag_text(text, "cdnthumburl")
+        )
+        link_type, link_style = _classify_link_share(
+            app_type=app_type,
+            url=url,
+            source_username=str(source_username or "").strip(),
+            desc=str(des or "").strip(),
+        )
         return {
             "renderType": "link",
             "content": des or title or "[链接]",
@@ -817,6 +1002,8 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             "thumbUrl": thumb_url or "",
             "from": str(source_display_name or "").strip(),
             "fromUsername": str(source_username or "").strip(),
+            "linkType": link_type,
+            "linkStyle": link_style,
         }
 
     if app_type in (6, 74):
@@ -870,7 +1057,7 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             or ""
         )
         refer_svrid = _extract_xml_tag_or_attr(refer_block, "svrid")
-        refer_content = _extract_xml_tag_text(refer_block, "content")
+        refer_content = _extract_refermsg_content(refer_block)
         refer_type = _extract_xml_tag_or_attr(refer_block, "type")
 
         rt = (reply_text or "").strip()
@@ -887,6 +1074,7 @@ def _parse_app_message(text: str) -> dict[str, Any]:
                     refer_content = rest
 
         t = str(refer_type or "").strip()
+        quote_thumb_url = ""
         quote_voice_length = ""
         if t == "3":
             refer_content = "[图片]"
@@ -907,8 +1095,29 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             except Exception:
                 quote_voice_length = ""
             refer_content = "[语音]"
-        elif t == "49" and refer_content:
-            refer_content = f"[链接] {refer_content}".strip()
+        elif t == "57":
+            summarized = _summarize_nested_quote_content(str(refer_content or ""))
+            if summarized:
+                refer_content = summarized
+            elif str(refer_content or "").lstrip().startswith("<"):
+                refer_content = "[引用消息]"
+        elif t in {"49", "5", "68"}:
+            raw_link_content = str(refer_content or "").strip()
+            summarized = _summarize_nested_quote_content(raw_link_content)
+            link_text = str(summarized or raw_link_content).strip()
+            quote_thumb_url = _extract_nested_quote_thumb_url(raw_link_content)
+
+            if link_text.startswith("wxid_"):
+                colon = link_text.find(":")
+                if 0 < colon <= 64:
+                    maybe_rest = link_text[colon + 1 :].strip()
+                    if maybe_rest:
+                        second_try = _summarize_nested_quote_content(maybe_rest)
+                        link_text = str(second_try or maybe_rest).strip()
+                    if not quote_thumb_url:
+                        quote_thumb_url = _extract_nested_quote_thumb_url(maybe_rest)
+
+            refer_content = f"[链接] {link_text}".strip() if link_text else "[链接]"
 
         return {
             "renderType": "quote",
@@ -917,11 +1126,15 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             "quoteTitle": refer_displayname or "",
             "quoteContent": refer_content or "",
             "quoteType": t,
+            "quoteThumbUrl": quote_thumb_url,
             "quoteServerId": str(refer_svrid or "").strip(),
             "quoteVoiceLength": quote_voice_length,
         }
 
-    if app_type == 62 or "<patmsg" in lower or 'type="patmsg"' in lower or "type='patmsg'" in lower:
+    # Some versions may mark pat messages via sysmsg/appmsg tag attribute: <sysmsg type="patmsg">...</sysmsg>.
+    # Be strict here: lots of non-pat appmsg payloads still carry a nested <patMsg>...</patMsg> metadata block.
+    patmsg_attr = bool(re.search(r"<(sysmsg|appmsg)\b[^>]*\btype=['\"]patmsg['\"]", lower))
+    if app_type == 62 or patmsg_attr:
         return {"renderType": "system", "content": "[拍一拍]"}
 
     if app_type == 2000 or (
@@ -1053,11 +1266,7 @@ def _build_latest_message_preview(
 
     content_text = ""
     if local_type == 10000:
-        if "revokemsg" in raw_text:
-            content_text = "撤回了一条消息"
-        else:
-            content_text = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", raw_text)
-            content_text = re.sub(r"\s+", " ", content_text).strip() or "[系统消息]"
+        content_text = _parse_system_message_content(raw_text)
     elif local_type == 244813135921:
         parsed = _parse_app_message(raw_text)
         qt = str(parsed.get("quoteTitle") or "").strip()
@@ -1093,7 +1302,7 @@ def _build_latest_message_preview(
     elif local_type == 43 or local_type == 62:
         content_text = "[视频]"
     elif local_type == 47:
-        content_text = "[表情]"
+        content_text = "[动画表情]"
     else:
         if raw_text and (not raw_text.startswith("<")) and (not raw_text.startswith('"<')):
             content_text = raw_text
@@ -1105,6 +1314,101 @@ def _build_latest_message_preview(
     if sender_prefix and content_text:
         return f"{sender_prefix}: {content_text}"
     return content_text
+
+
+def _extract_group_preview_sender_username(preview_text: str) -> str:
+    text = str(preview_text or "").strip()
+    if not text:
+        return ""
+
+    match = re.match(r"^([^:\s]{1,128}):\s*.+$", text)
+    if not match:
+        return ""
+
+    sender = str(match.group(1) or "").strip()
+    if not sender:
+        return ""
+
+    if sender.startswith("wxid_") or sender.endswith("@chatroom") or ("@" in sender):
+        return sender
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,127}", sender):
+        return sender
+    return ""
+
+
+def _normalize_session_preview_text(
+    preview_text: str,
+    *,
+    is_group: bool,
+    sender_display_names: Optional[dict[str, str]] = None,
+) -> str:
+    text = re.sub(r"\s+", " ", str(preview_text or "").strip()).strip()
+    if not text:
+        return ""
+
+    text = text.replace("[表情]", "[动画表情]")
+    if (not is_group) or text.startswith("[草稿]"):
+        return text
+
+    match = re.match(r"^([^:\s]{1,128}):\s*(.+)$", text)
+    if not match:
+        return text
+
+    sender_username = str(match.group(1) or "").strip()
+    body = str(match.group(2) or "").strip()
+    if (not sender_username) or (not body):
+        return text
+
+    display_name = str((sender_display_names or {}).get(sender_username) or "").strip()
+    if display_name and display_name != sender_username:
+        return f"{display_name}: {body}"
+    return text
+
+
+def _replace_preview_sender_prefix(preview_text: str, sender_display_name: str) -> str:
+    text = re.sub(r"\s+", " ", str(preview_text or "").strip()).strip()
+    if not text:
+        return ""
+
+    display_name = str(sender_display_name or "").strip()
+    if (not display_name) or text.startswith("[草稿]"):
+        return text
+
+    match = re.match(r"^([^:\n]{1,128}):\s*(.+)$", text)
+    if not match:
+        return text
+
+    body = re.sub(r"\s+", " ", str(match.group(2) or "").strip()).strip()
+    if not body:
+        return text
+    return f"{display_name}: {body}"
+
+
+def _build_group_sender_display_name_map(
+    contact_db_path: Path,
+    previews: dict[str, str],
+) -> dict[str, str]:
+    group_sender_usernames: set[str] = set()
+    for conv_username, preview_text in previews.items():
+        if not str(conv_username or "").endswith("@chatroom"):
+            continue
+        sender_username = _extract_group_preview_sender_username(preview_text)
+        if sender_username:
+            group_sender_usernames.add(sender_username)
+
+    if not group_sender_usernames:
+        return {}
+
+    display_names: dict[str, str] = {}
+    sender_contact_rows = _load_contact_rows(contact_db_path, list(group_sender_usernames))
+    for sender_username in group_sender_usernames:
+        row = sender_contact_rows.get(sender_username)
+        if row is None:
+            continue
+        display_name = _pick_display_name(row, sender_username)
+        if display_name and display_name != sender_username:
+            display_names[sender_username] = display_name
+    return display_names
 
 
 def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> dict[str, str]:
@@ -1338,6 +1642,208 @@ def _load_contact_rows(contact_db_path: Path, usernames: list[str]) -> dict[str,
         conn.close()
 
 
+def _load_group_nickname_map_from_contact_db(
+    contact_db_path: Path,
+    chatroom_id: str,
+    sender_usernames: list[str],
+) -> dict[str, str]:
+    """Best-effort mapping for group member nickname (aka group card) from contact.db.
+
+    WeChat stores per-chatroom member nicknames in `contact.db.chat_room.ext_buffer` as a protobuf-like blob.
+    This helper parses that blob and returns { sender_username -> group_nickname } for the requested senders.
+
+    Notes:
+    - Best-effort: never raises; returns {} on any failure.
+    - Only resolves usernames included in `sender_usernames` to keep parsing cheap.
+    """
+
+    chatroom = str(chatroom_id or "").strip()
+    if not chatroom.endswith("@chatroom"):
+        return {}
+
+    targets = list(dict.fromkeys([str(x or "").strip() for x in sender_usernames if str(x or "").strip()]))
+    if not targets:
+        return {}
+    target_set = set(targets)
+
+    def decode_varint(raw: bytes, offset: int) -> tuple[Optional[int], int]:
+        value = 0
+        shift = 0
+        pos = int(offset)
+        n = len(raw)
+        while pos < n:
+            byte = raw[pos]
+            pos += 1
+            value |= (byte & 0x7F) << shift
+            if (byte & 0x80) == 0:
+                return value, pos
+            shift += 7
+            if shift > 63:
+                return None, n
+        return None, n
+
+    def iter_fields(raw: bytes):
+        idx = 0
+        n = len(raw)
+        while idx < n:
+            tag, idx_next = decode_varint(raw, idx)
+            if tag is None or idx_next <= idx:
+                break
+            idx = idx_next
+            field_no = int(tag) >> 3
+            wire_type = int(tag) & 0x7
+
+            if wire_type == 0:
+                _, idx_next = decode_varint(raw, idx)
+                if idx_next <= idx:
+                    break
+                idx = idx_next
+                continue
+
+            if wire_type == 2:
+                size, idx_next = decode_varint(raw, idx)
+                if size is None or idx_next <= idx:
+                    break
+                idx = idx_next
+                end = idx + int(size)
+                if end > n:
+                    break
+                chunk = raw[idx:end]
+                idx = end
+                yield field_no, wire_type, chunk
+                continue
+
+            if wire_type == 1:
+                idx += 8
+                continue
+            if wire_type == 5:
+                idx += 4
+                continue
+            break
+
+    def is_strong_username_hint(s: str) -> bool:
+        v = str(s or "").strip()
+        return v.startswith("wxid_") or v.endswith("@chatroom") or v.startswith("gh_") or ("@" in v)
+
+    def looks_like_username(s: str) -> bool:
+        v = str(s or "").strip()
+        if not v:
+            return False
+        if is_strong_username_hint(v):
+            return True
+        # Common alias-style WeChat IDs are ASCII-ish and do not contain whitespace.
+        if len(v) < 6 or len(v) > 32:
+            return False
+        if re.search(r"\s", v):
+            return False
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_-]+$", v):
+            return False
+        if v.isdigit():
+            return False
+        return True
+
+    def pick_display(strings: list[tuple[int, str]], target: str) -> str:
+        best_score = -1
+        best = ""
+        for i, (fno, value) in enumerate(strings):
+            v = str(value or "").strip()
+            if (not v) or v == target:
+                continue
+            if is_strong_username_hint(v):
+                continue
+            if "\n" in v or "\r" in v:
+                continue
+            if len(v) > 64:
+                continue
+
+            score = 0
+            if int(fno) == 2:
+                score += 100
+            if not looks_like_username(v):
+                score += 20
+            score += max(0, 32 - len(v))
+            # Stable tie-breaker: prefer earlier appearance.
+            score = score * 1000 - i
+            if score > best_score:
+                best_score = score
+                best = v
+        return best
+
+    try:
+        conn = sqlite3.connect(str(contact_db_path))
+    except Exception:
+        return {}
+
+    try:
+        row = conn.execute(
+            "SELECT ext_buffer FROM chat_room WHERE username = ? LIMIT 1",
+            (chatroom,),
+        ).fetchone()
+        if row is None:
+            return {}
+
+        ext = row[0]
+        if ext is None:
+            return {}
+        if isinstance(ext, memoryview):
+            ext_buf = ext.tobytes()
+        elif isinstance(ext, (bytes, bytearray)):
+            ext_buf = bytes(ext)
+        else:
+            return {}
+        if not ext_buf:
+            return {}
+
+        out: dict[str, str] = {}
+        for _, wire_type, chunk in iter_fields(ext_buf):
+            if wire_type != 2 or (not chunk):
+                continue
+
+            # Parse submessage and collect UTF-8 strings.
+            strings: list[tuple[int, str]] = []
+            try:
+                for sfno, swire, sval in iter_fields(chunk):
+                    if swire != 2:
+                        continue
+                    if not sval:
+                        continue
+                    if len(sval) > 256:
+                        continue
+                    try:
+                        txt = bytes(sval).decode("utf-8", errors="strict")
+                    except Exception:
+                        continue
+                    txt = txt.strip()
+                    if not txt:
+                        continue
+                    strings.append((int(sfno), txt))
+            except Exception:
+                continue
+
+            if not strings:
+                continue
+
+            present = [v for _, v in strings if v in target_set and v not in out]
+            if not present:
+                continue
+
+            for target in present:
+                disp = pick_display(strings, target)
+                if disp:
+                    out[target] = disp
+            if len(out) >= len(target_set):
+                break
+
+        return out
+    except Exception:
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _load_usernames_by_display_names(contact_db_path: Path, names: list[str]) -> dict[str, str]:
     """Best-effort mapping from display name -> username using contact.db.
 
@@ -1488,10 +1994,10 @@ def _row_to_search_hit(
     if is_group and raw_text and (not raw_text.startswith("<")) and (not raw_text.startswith('"<')):
         sender_prefix, raw_text = _split_group_sender_prefix(raw_text, sender_username)
 
-    if is_group and sender_prefix:
+    if is_group and sender_prefix and (not sender_username):
         sender_username = sender_prefix
 
-    if is_group and raw_text and (raw_text.startswith("<") or raw_text.startswith('"<')):
+    if is_group and (not sender_username) and raw_text and (raw_text.startswith("<") or raw_text.startswith('"<')):
         xml_sender = _extract_sender_from_group_xml(raw_text)
         if xml_sender:
             sender_username = xml_sender
@@ -1508,6 +2014,9 @@ def _row_to_search_hit(
     quote_username = ""
     quote_title = ""
     quote_content = ""
+    quote_thumb_url = ""
+    link_type = ""
+    link_style = ""
     amount = ""
     pay_sub_type = ""
     transfer_status = ""
@@ -1515,11 +2024,7 @@ def _row_to_search_hit(
 
     if local_type == 10000:
         render_type = "system"
-        if "revokemsg" in raw_text:
-            content_text = "撤回了一条消息"
-        else:
-            content_text = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", raw_text)
-            content_text = re.sub(r"\s+", " ", content_text).strip() or "[系统消息]"
+        content_text = _parse_system_message_content(raw_text)
     elif local_type == 49:
         parsed = _parse_app_message(raw_text)
         render_type = str(parsed.get("renderType") or "text")
@@ -1528,6 +2033,9 @@ def _row_to_search_hit(
         url = str(parsed.get("url") or "")
         quote_title = str(parsed.get("quoteTitle") or "")
         quote_content = str(parsed.get("quoteContent") or "")
+        quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+        link_type = str(parsed.get("linkType") or "")
+        link_style = str(parsed.get("linkStyle") or "")
         quote_username = str(parsed.get("quoteUsername") or "")
         amount = str(parsed.get("amount") or "")
         pay_sub_type = str(parsed.get("paySubType") or "")
@@ -1552,6 +2060,7 @@ def _row_to_search_hit(
         content_text = str(parsed.get("content") or "[引用消息]")
         quote_title = str(parsed.get("quoteTitle") or "")
         quote_content = str(parsed.get("quoteContent") or "")
+        quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
         quote_username = str(parsed.get("quoteUsername") or "")
     elif local_type == 3:
         render_type = "image"
@@ -1601,6 +2110,9 @@ def _row_to_search_hit(
                         url = str(parsed.get("url") or url)
                         quote_title = str(parsed.get("quoteTitle") or quote_title)
                         quote_content = str(parsed.get("quoteContent") or quote_content)
+                        quote_thumb_url = str(parsed.get("quoteThumbUrl") or quote_thumb_url)
+                        link_type = str(parsed.get("linkType") or link_type)
+                        link_style = str(parsed.get("linkStyle") or link_style)
                         amount = str(parsed.get("amount") or amount)
                         pay_sub_type = str(parsed.get("paySubType") or pay_sub_type)
                         quote_username = str(parsed.get("quoteUsername") or quote_username)
@@ -1640,9 +2152,12 @@ def _row_to_search_hit(
         "content": content_text,
         "title": title,
         "url": url,
+        "linkType": link_type,
+        "linkStyle": link_style,
         "quoteUsername": quote_username,
         "quoteTitle": quote_title,
         "quoteContent": quote_content,
+        "quoteThumbUrl": quote_thumb_url,
         "amount": amount,
         "paySubType": pay_sub_type,
         "transferStatus": transfer_status,

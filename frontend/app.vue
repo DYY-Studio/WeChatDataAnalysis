@@ -1,18 +1,45 @@
 <template>
   <div :class="rootClass">
-    <DesktopTitleBar v-if="isDesktop && !isChatRoute" />
-    <div :class="contentClass">
-      <NuxtPage />
+    <SidebarRail v-if="showSidebar" />
+    <div class="flex-1 flex flex-col min-h-0">
+      <!-- Desktop titlebar lives above the page content (right column) -->
+      <DesktopTitleBar />
+      <div :class="contentClass">
+        <NuxtPage />
+      </div>
     </div>
+
+    <ClientOnly v-if="isDesktopUpdater">
+      <DesktopUpdateDialog
+        :open="desktopUpdate.open.value"
+        :info="desktopUpdate.info.value"
+        :is-downloading="desktopUpdate.isDownloading.value"
+        :ready-to-install="desktopUpdate.readyToInstall.value"
+        :progress="desktopUpdate.progress.value"
+        :error="desktopUpdate.error.value"
+        :has-ignore="true"
+        @close="desktopUpdate.dismiss"
+        @update="desktopUpdate.startUpdate"
+        @install="desktopUpdate.installUpdate"
+        @ignore="desktopUpdate.ignore"
+      />
+    </ClientOnly>
   </div>
 </template>
 
 <script setup>
+import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { usePrivacyStore } from '~/stores/privacy'
+
+const route = useRoute()
+const desktopUpdate = useDesktopUpdate()
+
 // In Electron the server/pre-render doesn't know about `window.wechatDesktop`.
 // If we render different DOM on server vs client, Vue hydration will keep the
 // server HTML (no patch) and the layout/CSS fixes won't apply reliably.
 // So we detect desktop onMounted and update reactively.
 const isDesktop = ref(false)
+const isDesktopUpdater = ref(false)
 
 const updateDprVar = () => {
   const dpr = window.devicePixelRatio || 1
@@ -20,28 +47,52 @@ const updateDprVar = () => {
 }
 
 onMounted(() => {
-  isDesktop.value = !!window?.wechatDesktop
+  const isElectron = /electron/i.test(String(navigator.userAgent || ''))
+  const api = window?.wechatDesktop
+  isDesktop.value = isElectron && !!api
+  const brandOk = !api?.__brand || api.__brand === 'WeChatDataAnalysisDesktop'
+  isDesktopUpdater.value =
+    isDesktop.value &&
+    brandOk &&
+    typeof api?.checkForUpdates === 'function' &&
+    typeof api?.downloadAndInstall === 'function'
   updateDprVar()
   window.addEventListener('resize', updateDprVar)
+
+  if (isDesktopUpdater.value) {
+    void desktopUpdate.initListeners()
+  }
+
+  // Init global UI state.
+  const chatAccounts = useChatAccountsStore()
+  const privacy = usePrivacyStore()
+  void chatAccounts.ensureLoaded()
+  privacy.init()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateDprVar)
 })
 
-const route = useRoute()
-const isChatRoute = computed(() => route.path?.startsWith('/chat') || route.path?.startsWith('/sns') || route.path?.startsWith('/contacts'))
-
 const rootClass = computed(() => {
   const base = 'bg-gradient-to-br from-green-50 via-emerald-50 to-green-100'
   return isDesktop.value
-    ? `wechat-desktop h-screen flex flex-col overflow-hidden ${base}`
-    : `min-h-screen ${base}`
+    ? `wechat-desktop h-screen flex overflow-hidden ${base}`
+    : `h-screen flex overflow-hidden ${base}`
 })
 
 const contentClass = computed(() =>
-  isDesktop.value ? 'wechat-desktop-content flex-1 overflow-auto min-h-0' : ''
+  isDesktop.value
+    ? 'wechat-desktop-content flex-1 overflow-auto min-h-0'
+    : 'flex-1 overflow-auto min-h-0'
 )
+
+const showSidebar = computed(() => {
+  const path = String(route.path || '')
+  if (path === '/') return false
+  if (path === '/decrypt' || path === '/detection-result' || path === '/decrypt-result') return false
+  return !(path === '/wrapped' || path.startsWith('/wrapped/'))
+})
 </script>
 
 <style>
@@ -69,16 +120,5 @@ const contentClass = computed(() =>
 
 .wechat-desktop .wechat-desktop-content > .min-h-screen {
   min-height: 100%;
-}
-
-/* 页面过渡动画 - 渐显渐隐效果 */
-.page-enter-active,
-.page-leave-active {
-  transition: opacity 0.3s ease;
-}
-
-.page-enter-from,
-.page-leave-to {
-  opacity: 0;
 }
 </style>

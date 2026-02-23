@@ -1,80 +1,6 @@
 <template>
   <div class="h-screen flex overflow-hidden" style="background-color: #EDEDED">
-    <div class="border-r border-gray-200 flex flex-col" style="background-color: #e8e7e7; width: 60px; min-width: 60px; max-width: 60px">
-      <div class="flex-1 flex flex-col justify-start pt-0 gap-0">
-        <div class="w-full h-[60px] flex items-center justify-center">
-          <div class="w-[40px] h-[40px] rounded-md overflow-hidden bg-gray-300 flex-shrink-0">
-            <img v-if="selfAvatarUrl" :src="selfAvatarUrl" alt="avatar" class="w-full h-full object-cover" />
-            <div v-else class="w-full h-full flex items-center justify-center text-white text-xs font-bold" style="background-color: #4B5563">我</div>
-          </div>
-        </div>
-
-        <div class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group" title="聊天" @click="goChat">
-          <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isChatRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M12 19.8C17.52 19.8 22 15.99 22 11.3C22 6.6 17.52 2.8 12 2.8C6.48 2.8 2 6.6 2 11.3C2 13.29 2.8 15.12 4.15 16.57C4.6 17.05 4.82 17.29 4.92 17.44C5.14 17.79 5.21 17.99 5.23 18.4C5.24 18.59 5.22 18.81 5.16 19.26C5.1 19.75 5.07 19.99 5.13 20.16C5.23 20.49 5.53 20.71 5.87 20.72C6.04 20.72 6.27 20.63 6.72 20.43L8.07 19.86C8.43 19.71 8.61 19.63 8.77 19.59C8.95 19.55 9.04 19.54 9.22 19.54C9.39 19.53 9.64 19.57 10.14 19.65C10.74 19.75 11.37 19.8 12 19.8Z" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <div class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group" title="朋友圈" @click="goSns">
-          <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isSnsRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="14.31" y1="8" x2="20.05" y2="17.94" />
-                <line x1="9.69" y1="8" x2="21.17" y2="8" />
-                <line x1="7.38" y1="12" x2="13.12" y2="2.06" />
-                <line x1="9.69" y1="16" x2="3.95" y2="6.06" />
-                <line x1="14.31" y1="16" x2="2.83" y2="16" />
-                <line x1="16.62" y1="12" x2="10.88" y2="21.94" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <div class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group" title="联系人">
-          <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)] text-[#07b75b]">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" />
-                <circle cx="10" cy="7" r="4" />
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <div class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group" title="年度总结" @click="goWrapped">
-          <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
-            <div class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="isWrappedRoute ? 'text-[#07b75b]' : 'text-[#5d5d5d]'">
-              <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="4" y="4" width="16" height="16" rx="2" />
-                <path d="M8 16v-5" />
-                <path d="M12 16v-8" />
-                <path d="M16 16v-3" />
-              </svg>
-            </div>
-          </div>
-        </div>
-
-        <div class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group" @click="privacyMode = !privacyMode" :title="privacyMode ? '关闭隐私模式' : '开启隐私模式'">
-          <div class="w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent group-hover:bg-[#E1E1E1]">
-            <svg class="w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="privacyMode ? 'text-[#07b75b]' : 'text-[#5d5d5d]'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path v-if="privacyMode" stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-              <path v-else stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-              <circle v-if="!privacyMode" cx="12" cy="12" r="3" />
-            </svg>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div class="flex-1 flex flex-col min-h-0" style="background-color: #EDEDED">
-      <DesktopTitleBar />
       <div class="flex-1 min-h-0 overflow-hidden p-4">
         <div class="h-full grid grid-cols-1 lg:grid-cols-[400px_minmax(0,1fr)] gap-4">
           <div class="bg-white border border-gray-200 rounded-lg flex flex-col min-h-0 overflow-hidden">
@@ -120,29 +46,34 @@
               <div v-else-if="error" class="p-4 text-sm text-red-500 whitespace-pre-wrap">{{ error }}</div>
               <div v-else-if="contacts.length === 0" class="p-4 text-sm text-gray-500">暂无联系人</div>
               <div v-else>
-                <div
-                  v-for="contact in contacts"
-                  :key="contact.username"
-                  class="px-3 py-2 border-b border-gray-100 flex items-center gap-3"
-                >
-                  <div class="w-10 h-10 rounded-md overflow-hidden bg-gray-300 shrink-0" :class="{ 'privacy-blur': privacyMode }">
-                    <img v-if="contact.avatar" :src="contact.avatar" :alt="contact.displayName" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
-                    <div v-else class="w-full h-full flex items-center justify-center text-white text-xs font-bold" style="background-color:#4B5563">{{ contact.displayName?.charAt(0) || '?' }}</div>
+                <div v-for="group in groupedContacts" :key="group.key">
+                  <div class="px-3 py-1 text-xs font-semibold text-gray-500 bg-gray-50 border-b border-gray-100">
+                    {{ group.key }}
                   </div>
-                  <div class="min-w-0 flex-1" :class="{ 'privacy-blur': privacyMode }">
-                    <div class="text-sm text-gray-900 truncate">{{ contact.displayName }}</div>
-                    <div class="text-xs text-gray-500 truncate">{{ contact.username }}</div>
-                    <div class="text-[11px] text-gray-500 truncate" v-if="contact.type !== 'group' && (contact.region || contact.source)">
-                      <span v-if="contact.region">地区：{{ contact.region }}</span>
-                      <span v-if="contact.region && contact.source"> · </span>
-                      <span
-                        v-if="contact.source"
-                        :title="contact.sourceScene != null ? `来源场景码：${contact.sourceScene}` : ''"
-                      >来源：{{ contact.source }}</span>
+                  <div
+                    v-for="contact in group.items"
+                    :key="contact.username"
+                    class="px-3 py-2 border-b border-gray-100 flex items-center gap-3"
+                  >
+                    <div class="w-10 h-10 rounded-md overflow-hidden bg-gray-300 shrink-0" :class="{ 'privacy-blur': privacyMode }">
+                      <img v-if="contact.avatar" :src="contact.avatar" :alt="contact.displayName" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                      <div v-else class="w-full h-full flex items-center justify-center text-white text-xs font-bold" style="background-color:#4B5563">{{ contact.displayName?.charAt(0) || '?' }}</div>
                     </div>
-                  </div>
-                  <div class="text-xs px-2 py-0.5 rounded" :class="typeBadgeClass(contact.type)">
-                    {{ typeLabel(contact.type) }}
+                    <div class="min-w-0 flex-1" :class="{ 'privacy-blur': privacyMode }">
+                      <div class="text-sm text-gray-900 truncate">{{ contact.displayName }}</div>
+                      <div class="text-xs text-gray-500 truncate">{{ contact.username }}</div>
+                      <div class="text-[11px] text-gray-500 truncate" v-if="contact.type !== 'group' && (contact.region || contact.source)">
+                        <span v-if="contact.region">地区：{{ contact.region }}</span>
+                        <span v-if="contact.region && contact.source"> · </span>
+                        <span
+                          v-if="contact.source"
+                          :title="contact.sourceScene != null ? `来源场景码：${contact.sourceScene}` : ''"
+                        >来源：{{ contact.source }}</span>
+                      </div>
+                    </div>
+                    <div class="text-xs px-2 py-0.5 rounded" :class="typeBadgeClass(contact.type)">
+                      {{ typeLabel(contact.type) }}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -198,34 +129,20 @@
 </template>
 
 <script setup>
+import { storeToRefs } from 'pinia'
+import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { usePrivacyStore } from '~/stores/privacy'
+
 useHead({ title: '联系人 - 微信数据分析助手' })
 
-const route = useRoute()
 const api = useApi()
 
-const isChatRoute = computed(() => route.path?.startsWith('/chat'))
-const isSnsRoute = computed(() => route.path?.startsWith('/sns'))
-const isWrappedRoute = computed(() => route.path?.startsWith('/wrapped'))
+const chatAccounts = useChatAccountsStore()
+const { accounts: availableAccounts, selectedAccount } = storeToRefs(chatAccounts)
 
-const PRIVACY_MODE_KEY = 'ui.privacy_mode'
-const privacyMode = ref(false)
-onMounted(() => {
-  if (!process.client) return
-  try {
-    privacyMode.value = localStorage.getItem(PRIVACY_MODE_KEY) === '1'
-  } catch {}
-})
-watch(() => privacyMode.value, (v) => {
-  if (!process.client) return
-  try {
-    localStorage.setItem(PRIVACY_MODE_KEY, v ? '1' : '0')
-  } catch {}
-})
+const privacyStore = usePrivacyStore()
+const { privacyMode } = storeToRefs(privacyStore)
 
-const sidebarMediaBase = process.client ? 'http://localhost:8000' : ''
-
-const availableAccounts = ref([])
-const selectedAccount = ref(null)
 const searchKeyword = ref('')
 
 const contactTypes = reactive({
@@ -258,12 +175,6 @@ const exporting = ref(false)
 const exportMsg = ref('')
 const exportOk = ref(false)
 
-const selfAvatarUrl = computed(() => {
-  const acc = String(selectedAccount.value || '').trim()
-  if (!acc) return ''
-  return `${sidebarMediaBase}/api/chat/avatar?account=${encodeURIComponent(acc)}&username=${encodeURIComponent(acc)}`
-})
-
 const typeLabel = (type) => {
   if (type === 'friend') return '好友'
   if (type === 'group') return '群聊'
@@ -278,17 +189,53 @@ const typeBadgeClass = (type) => {
   return 'bg-gray-100 text-gray-600'
 }
 
-const goChat = async () => {
-  await navigateTo('/chat')
+const normalizeContactGroupKey = (value) => {
+  const key = String(value || '').trim().toUpperCase()
+  if (key.length === 1 && key >= 'A' && key <= 'Z') return key
+  return '#'
 }
 
-const goSns = async () => {
-  await navigateTo('/sns')
+const buildContactSortKey = (contact) => {
+  const pinyinKey = String(contact?.pinyinKey || '').trim().toLowerCase()
+  if (pinyinKey) return pinyinKey
+  const nameKey = String(contact?.displayName || '').trim().toLowerCase()
+  if (nameKey) return nameKey
+  return String(contact?.username || '').trim().toLowerCase()
 }
 
-const goWrapped = async () => {
-  await navigateTo('/wrapped')
-}
+const groupedContacts = computed(() => {
+  const list = Array.isArray(contacts.value) ? contacts.value : []
+  const rows = list.map((contact) => {
+    return {
+      contact,
+      groupKey: normalizeContactGroupKey(contact?.pinyinInitial),
+      sortKey: buildContactSortKey(contact),
+      usernameKey: String(contact?.username || '').trim().toLowerCase(),
+    }
+  })
+
+  rows.sort((a, b) => {
+    if (a.groupKey !== b.groupKey) {
+      if (a.groupKey === '#') return 1
+      if (b.groupKey === '#') return -1
+      return a.groupKey.localeCompare(b.groupKey)
+    }
+    const cmpKey = a.sortKey.localeCompare(b.sortKey)
+    if (cmpKey !== 0) return cmpKey
+    return a.usernameKey.localeCompare(b.usernameKey)
+  })
+
+  const groups = []
+  for (const row of rows) {
+    const last = groups[groups.length - 1]
+    if (!last || last.key !== row.groupKey) {
+      groups.push({ key: row.groupKey, items: [row.contact] })
+    } else {
+      last.items.push(row.contact)
+    }
+  }
+  return groups
+})
 
 const isDesktopExportRuntime = () => {
   return !!(process.client && window?.wechatDesktop?.chooseDirectory)
@@ -430,15 +377,7 @@ const exportContactsInWeb = async () => {
 }
 
 const loadAccounts = async () => {
-  try {
-    const resp = await api.listChatAccounts()
-    const accounts = resp?.accounts || []
-    availableAccounts.value = accounts
-    selectedAccount.value = selectedAccount.value || resp?.default_account || accounts[0] || null
-  } catch (e) {
-    availableAccounts.value = []
-    selectedAccount.value = null
-  }
+  await chatAccounts.ensureLoaded({ force: true })
 }
 
 const loadContacts = async () => {
@@ -555,18 +494,8 @@ const startExport = async () => {
 }
 
 onMounted(async () => {
+  privacyStore.init()
   await loadAccounts()
   await loadContacts()
 })
 </script>
-
-<style scoped>
-.privacy-blur {
-  filter: blur(9px);
-  transition: filter 0.2s ease;
-}
-
-.privacy-blur:hover {
-  filter: none;
-}
-</style>

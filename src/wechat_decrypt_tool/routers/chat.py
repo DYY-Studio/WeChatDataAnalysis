@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import threading
+from datetime import datetime, timedelta
 from os import scandir
 from pathlib import Path
 from typing import Any, Optional
@@ -39,11 +40,17 @@ from ..chat_helpers import (
     _make_snippet,
     _match_tokens,
     _load_contact_rows,
+    _load_group_nickname_map_from_contact_db,
     _load_usernames_by_display_names,
     _load_latest_message_previews,
+    _build_group_sender_display_name_map,
+    _normalize_session_preview_text,
+    _extract_group_preview_sender_username,
+    _replace_preview_sender_prefix,
     _lookup_resource_md5,
     _normalize_xml_url,
     _parse_app_message,
+    _parse_system_message_content,
     _parse_pat_message,
     _pick_display_name,
     _query_head_image_usernames,
@@ -57,7 +64,8 @@ from ..chat_helpers import (
     _split_group_sender_prefix,
     _to_char_token_text,
 )
-from ..media_helpers import _try_find_decrypted_resource
+from ..media_helpers import _resolve_account_db_storage_dir, _try_find_decrypted_resource
+from .. import chat_edit_store
 from ..path_fix import PathFixRoute
 from ..session_last_message import (
     build_session_last_message_table,
@@ -67,10 +75,14 @@ from ..session_last_message import (
 from ..wcdb_realtime import (
     WCDBRealtimeError,
     WCDB_REALTIME,
+    exec_query as _wcdb_exec_query,
     get_avatar_urls as _wcdb_get_avatar_urls,
     get_display_names as _wcdb_get_display_names,
+    get_group_members as _wcdb_get_group_members,
+    get_group_nicknames as _wcdb_get_group_nicknames,
     get_messages as _wcdb_get_messages,
     get_sessions as _wcdb_get_sessions,
+    update_message as _wcdb_update_message,
 )
 
 logger = get_logger(__name__)
@@ -84,6 +96,271 @@ _REALTIME_SYNC_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REALTIME_SYNC_ALL_LOCKS: dict[str, threading.Lock] = {}
 
 
+def _is_hex_md5(value: Any) -> bool:
+    s = str(value or "").strip().lower()
+    return len(s) == 32 and all(c in "0123456789abcdef" for c in s)
+
+
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def _hex_to_bytes(value: str) -> Optional[bytes]:
+    s = str(value or "").strip()
+    if not s.startswith("0x"):
+        return None
+    hex_part = s[2:]
+    if (not hex_part) or (len(hex_part) % 2 != 0) or (_HEX_RE.match(hex_part) is None):
+        return None
+    try:
+        return bytes.fromhex(hex_part)
+    except Exception:
+        return None
+
+
+def _bytes_to_hex(value: bytes) -> str:
+    return "0x" + value.hex()
+
+
+def _is_mostly_printable_text(s: str) -> bool:
+    if not s:
+        return False
+    sample = s[:600]
+    if not sample:
+        return False
+    printable = sum(1 for ch in sample if ch.isprintable() or ch in {"\n", "\r", "\t"})
+    return (printable / len(sample)) >= 0.85
+
+
+def _jsonify_db_value(key: str, value: Any) -> Any:
+    """Convert sqlite row values into JSON-friendly values (best-effort)."""
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, (bytes, bytearray)):
+        b = bytes(value)
+        k = str(key or "").strip().lower()
+        if k in {"compress_content", "packed_info_data", "packed_info", "packedinfo", "packedinfodata"} or k.endswith(
+            "_data"
+        ):
+            return _bytes_to_hex(b)
+        if not b:
+            return ""
+        try:
+            s = b.decode("utf-8")
+            if _is_mostly_printable_text(s):
+                return s
+        except Exception:
+            pass
+        return _bytes_to_hex(b)
+    if isinstance(value, (int, float, bool, str)):
+        return value
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _sql_literal(value: Any) -> str:
+    """Build a SQLite literal for WCDB exec_query (no parameters supported)."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        try:
+            return str(int(value))
+        except Exception:
+            return "0"
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, (bytes, bytearray)):
+        b = bytes(value)
+        return "X'" + b.hex() + "'"
+    s = str(value)
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _normalize_edit_value(col: str, value: Any, *, from_snapshot: bool = False) -> Any:
+    c = str(col or "").strip().lower()
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Allow editing BLOBs via 0x... hex strings (unsafe only, enforced elsewhere).
+        b = _hex_to_bytes(value)
+        if b is not None:
+            return b
+
+        # Some WCDB exec_query snapshots return raw BLOBs as bare hex strings (without 0x prefix).
+        # When restoring from snapshots (reset), convert them back to bytes so SQLite stores them as BLOB again.
+        want_blob_hex = (
+            c in {"packed_info_data", "packed_info", "packedinfo", "packedinfodata"}
+            or c.endswith("_data")
+            or c in {"source"}
+            or (from_snapshot and c in {"message_content", "compress_content"})
+        )
+        if want_blob_hex:
+            s = value.strip()
+            # Heuristic for message_content: avoid converting legitimate short "hex-like" text messages.
+            min_len = 0
+            if c == "message_content":
+                s_lower = s.lower()
+                # zstd frame magic: 28 b5 2f fd
+                if s_lower.startswith("28b52ffd"):
+                    min_len = 16
+                else:
+                    min_len = 64
+            if s and (len(s) >= min_len) and (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
+                try:
+                    return bytes.fromhex(s)
+                except Exception:
+                    return value
+        if c in {
+            "local_id",
+            "create_time",
+            "server_id",
+            "local_type",
+            "sort_seq",
+        } or c.startswith("wcdb_ct_"):
+            s = value.strip()
+            if s and re.fullmatch(r"-?\d+", s):
+                try:
+                    return int(s)
+                except Exception:
+                    return value
+    return value
+
+
+def _is_safe_edit_column(col: str, *, unsafe: bool) -> bool:
+    if unsafe:
+        return True
+    c = str(col or "").strip().lower()
+    if not c:
+        return False
+    if c == "local_id":
+        return False
+    if c.startswith("wcdb_ct_"):
+        return False
+    if c in {"compress_content", "packed_info_data", "packed_info"}:
+        return False
+    return True
+
+
+def _pb_read_varint(buf: bytes, i: int) -> tuple[int, int]:
+    """Read a protobuf varint from buf starting at i, returning (value, next_index)."""
+    x = 0
+    shift = 0
+    while i < len(buf) and shift < 64:
+        b = buf[i]
+        i += 1
+        x |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return x, i
+        shift += 7
+    raise ValueError("Invalid varint.")
+
+
+def _pb_write_varint(x: int) -> bytes:
+    """Write a protobuf varint for a non-negative integer."""
+    n = int(x or 0)
+    if n < 0:
+        raise ValueError("Negative varint.")
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _swap_packed_info_from_to(packed: bytes | bytearray | memoryview) -> tuple[bytes, int, int]:
+    """Swap protobuf field #1 and #2 varint values in packed_info_data.
+
+    Empirically, WeChat uses packed_info_data as a tiny protobuf containing at least:
+    - field 1: fromId (Name2Id rowid)
+    - field 2: toId   (Name2Id rowid)
+
+    Swapping these flips message direction in the WeChat client.
+    Returns (new_bytes, old_field1, old_field2).
+    """
+    if isinstance(packed, memoryview):
+        data = packed.tobytes()
+    else:
+        data = bytes(packed)
+    if not data:
+        raise ValueError("Empty packed_info_data.")
+
+    # Pass 1: find the first occurrences of field 1/2 varints.
+    i = 0
+    v1: Optional[int] = None
+    v2: Optional[int] = None
+    while i < len(data):
+        key, i = _pb_read_varint(data, i)
+        field_num = key >> 3
+        wire = key & 7
+        if wire == 0:
+            val, i = _pb_read_varint(data, i)
+            if field_num == 1 and v1 is None:
+                v1 = int(val)
+            elif field_num == 2 and v2 is None:
+                v2 = int(val)
+            continue
+        if wire == 1:
+            i += 8
+            continue
+        if wire == 2:
+            ln, i = _pb_read_varint(data, i)
+            i += int(ln)
+            continue
+        if wire == 5:
+            i += 4
+            continue
+        raise ValueError(f"Unsupported wire type: {wire}")
+
+    if v1 is None or v2 is None:
+        raise ValueError("packed_info_data does not contain field #1 and #2 varints.")
+
+    # Pass 2: rebuild and swap values for all field 1/2 varints.
+    i = 0
+    out = bytearray()
+    while i < len(data):
+        key, i2 = _pb_read_varint(data, i)
+        field_num = key >> 3
+        wire = key & 7
+        out += _pb_write_varint(key)
+        i = i2
+
+        if wire == 0:
+            val, i = _pb_read_varint(data, i)
+            if field_num == 1:
+                val = int(v2)
+            elif field_num == 2:
+                val = int(v1)
+            out += _pb_write_varint(int(val))
+            continue
+        if wire == 1:
+            out += data[i : i + 8]
+            i += 8
+            continue
+        if wire == 2:
+            ln, i = _pb_read_varint(data, i)
+            out += _pb_write_varint(int(ln))
+            out += data[i : i + int(ln)]
+            i += int(ln)
+            continue
+        if wire == 5:
+            out += data[i : i + 4]
+            i += 4
+            continue
+        raise ValueError(f"Unsupported wire type: {wire}")
+
+    return bytes(out), int(v1), int(v2)
+
+
 def _avatar_url_unified(
     *,
     account_dir: Path,
@@ -95,6 +372,142 @@ def _avatar_url_unified(
         return ""
     # Unified avatar entrypoint: backend decides local db vs remote fallback + cache.
     return _build_avatar_url(str(account_dir.name or ""), u)
+
+
+def _load_group_nickname_map_from_wcdb(
+    *,
+    account_dir: Path,
+    chatroom_id: str,
+    sender_usernames: list[str],
+    rt_conn=None,
+) -> dict[str, str]:
+    chatroom = str(chatroom_id or "").strip()
+    if not chatroom.endswith("@chatroom"):
+        return {}
+
+    targets = list(dict.fromkeys([str(x or "").strip() for x in sender_usernames if str(x or "").strip()]))
+    if not targets:
+        return {}
+
+    try:
+        wcdb_conn = rt_conn or WCDB_REALTIME.ensure_connected(account_dir)
+    except Exception:
+        return {}
+
+    target_set = set(targets)
+    out: dict[str, str] = {}
+
+    try:
+        with wcdb_conn.lock:
+            nickname_map = _wcdb_get_group_nicknames(wcdb_conn.handle, chatroom)
+        for username, nickname in (nickname_map or {}).items():
+            su = str(username or "").strip()
+            nn = str(nickname or "").strip()
+            if su and nn and su in target_set:
+                out[su] = nn
+    except Exception:
+        pass
+
+    unresolved = [u for u in targets if u not in out]
+    if not unresolved:
+        return out
+
+    try:
+        with wcdb_conn.lock:
+            members = _wcdb_get_group_members(wcdb_conn.handle, chatroom)
+    except Exception:
+        return out
+
+    if not members:
+        return out
+
+    unresolved_set = set(unresolved)
+    for member in members:
+        try:
+            username = str(member.get("username") or "").strip()
+        except Exception:
+            username = ""
+        if (not username) or (username not in unresolved_set):
+            continue
+
+        nickname = ""
+        for key in ("nickname", "displayName", "remark", "originalName"):
+            try:
+                candidate = str(member.get(key) or "").strip()
+            except Exception:
+                candidate = ""
+            if candidate:
+                nickname = candidate
+                break
+        if nickname:
+            out[username] = nickname
+
+    return out
+
+
+def _load_group_nickname_map(
+    *,
+    account_dir: Path,
+    contact_db_path: Path,
+    chatroom_id: str,
+    sender_usernames: list[str],
+    rt_conn=None,
+) -> dict[str, str]:
+    """Resolve group member nickname (group card) via WCDB and contact.db ext_buffer (best-effort)."""
+
+    contact_map: dict[str, str] = {}
+    try:
+        contact_map = _load_group_nickname_map_from_contact_db(
+            contact_db_path,
+            chatroom_id,
+            sender_usernames,
+        )
+    except Exception:
+        contact_map = {}
+
+    wcdb_map: dict[str, str] = {}
+    try:
+        wcdb_map = _load_group_nickname_map_from_wcdb(
+            account_dir=account_dir,
+            chatroom_id=chatroom_id,
+            sender_usernames=sender_usernames,
+            rt_conn=rt_conn,
+        )
+    except Exception:
+        wcdb_map = {}
+
+    if not contact_map and not wcdb_map:
+        return {}
+
+    # Merge: WCDB wins (newer DLLs may provide higher-quality group nicknames).
+    merged: dict[str, str] = {}
+    merged.update(contact_map)
+    merged.update(wcdb_map)
+    return merged
+
+
+def _resolve_sender_display_name(
+    *,
+    sender_username: str,
+    sender_contact_rows: dict[str, sqlite3.Row],
+    wcdb_display_names: dict[str, str],
+    group_nicknames: Optional[dict[str, str]] = None,
+) -> str:
+    su = str(sender_username or "").strip()
+    if not su:
+        return ""
+
+    gn = str((group_nicknames or {}).get(su) or "").strip()
+    if gn:
+        return gn
+
+    row = sender_contact_rows.get(su)
+    display_name = _pick_display_name(row, su)
+    if display_name == su:
+        wd = str(wcdb_display_names.get(su) or "").strip()
+        if wd and wd != su:
+            display_name = wd
+    return display_name
 
 
 def _realtime_sync_lock(account: str, username: str) -> threading.Lock:
@@ -301,6 +714,33 @@ def _resolve_decrypted_message_table(account_dir: Path, username: str) -> Option
             conn.close()
 
     return None
+
+
+def _local_month_range_epoch_seconds(*, year: int, month: int) -> tuple[int, int]:
+    """Return [start, end) range as epoch seconds for local time month boundaries.
+
+    Notes:
+    - Uses local midnight boundaries (not +86400 * days) to stay DST-safe.
+    - Returned timestamps are integers (seconds).
+    """
+
+    start = datetime(int(year), int(month), 1)
+    if int(month) == 12:
+        end = datetime(int(year) + 1, 1, 1)
+    else:
+        end = datetime(int(year), int(month) + 1, 1)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _local_day_range_epoch_seconds(*, date_str: str) -> tuple[int, int, str]:
+    """Return [start, end) range as epoch seconds for local date boundaries.
+
+    Returns the normalized `YYYY-MM-DD` date string as the 3rd element.
+    """
+
+    d0 = datetime.strptime(str(date_str or "").strip(), "%Y-%m-%d")
+    d1 = d0 + timedelta(days=1)
+    return int(d0.timestamp()), int(d1.timestamp()), d0.strftime("%Y-%m-%d")
 
 
 def _pick_message_db_for_new_table(account_dir: Path, username: str) -> Optional[Path]:
@@ -557,8 +997,11 @@ def _upsert_session_table_rows(conn: sqlite3.Connection, rows: list[dict[str, An
         "draft",
         "last_timestamp",
         "sort_timestamp",
+        "last_msg_locald_id",
         "last_msg_type",
         "last_msg_sub_type",
+        "last_msg_sender",
+        "last_sender_display_name",
     ]
     update_cols = [c for c in desired_cols if c in cols]
     if not update_cols:
@@ -583,7 +1026,15 @@ def _upsert_session_table_rows(conn: sqlite3.Connection, rows: list[dict[str, An
             continue
         values: list[Any] = []
         for c in update_cols:
-            if c in {"unread_count", "is_hidden", "last_timestamp", "sort_timestamp", "last_msg_type", "last_msg_sub_type"}:
+            if c in {
+                "unread_count",
+                "is_hidden",
+                "last_timestamp",
+                "sort_timestamp",
+                "last_msg_locald_id",
+                "last_msg_type",
+                "last_msg_sub_type",
+            }:
                 values.append(_int((r or {}).get(c)))
             else:
                 values.append(_text((r or {}).get(c)))
@@ -630,6 +1081,82 @@ def _load_session_last_message_times(conn: sqlite3.Connection, usernames: list[s
                 ts = 0
             out[u] = int(ts or 0)
     return out
+
+
+def _session_row_get(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        if isinstance(row, sqlite3.Row):
+            return row[key]
+    except Exception:
+        return default
+    try:
+        return row.get(key, default)
+    except Exception:
+        return default
+
+
+def _contact_flag_is_top(flag_value: Any) -> bool:
+    try:
+        flag_int = int(flag_value)
+    except Exception:
+        return False
+    if flag_int < 0:
+        flag_int &= (1 << 64) - 1
+    return bool((flag_int >> 11) & 1)
+
+
+def _load_contact_top_flags(contact_db_path: Path, usernames: list[str]) -> dict[str, bool]:
+    uniq = list(dict.fromkeys([str(u or "").strip() for u in usernames if str(u or "").strip()]))
+    if not uniq:
+        return {}
+    if not contact_db_path.exists():
+        return {}
+
+    out: dict[str, bool] = {}
+    conn = sqlite3.connect(str(contact_db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        def has_flag_column(table: str) -> bool:
+            try:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            except Exception:
+                return False
+            cols: set[str] = set()
+            for r in rows:
+                try:
+                    cols.add(str(r["name"] if isinstance(r, sqlite3.Row) else r[1]).strip().lower())
+                except Exception:
+                    continue
+            return ("username" in cols) and ("flag" in cols)
+
+        chunk_size = 900
+        for table in ("contact", "stranger"):
+            if not has_flag_column(table):
+                continue
+
+            for i in range(0, len(uniq), chunk_size):
+                chunk = uniq[i : i + chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                try:
+                    rows = conn.execute(
+                        f"SELECT username, flag FROM {table} WHERE username IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                except Exception:
+                    continue
+
+                for r in rows:
+                    username = str(_session_row_get(r, "username", "") or "").strip()
+                    if not username:
+                        continue
+                    is_top = _contact_flag_is_top(_session_row_get(r, "flag", 0))
+                    if is_top:
+                        out[username] = True
+                    else:
+                        out.setdefault(username, False)
+        return out
+    finally:
+        conn.close()
 
 
 @router.post("/api/chat/realtime/sync", summary="实时消息同步到解密库（按会话增量）")
@@ -1510,8 +2037,17 @@ def sync_chat_realtime_messages_all(
                     "sort_timestamp",
                     item.get("sortTimestamp", item.get("last_timestamp", item.get("lastTimestamp", 0))),
                 ),
+                "last_msg_locald_id": item.get(
+                    "last_msg_locald_id",
+                    item.get("lastMsgLocaldId", item.get("lastMsgLocalId", 0)),
+                ),
                 "last_msg_type": item.get("last_msg_type", item.get("lastMsgType", 0)),
                 "last_msg_sub_type": item.get("last_msg_sub_type", item.get("lastMsgSubType", 0)),
+                "last_msg_sender": item.get("last_msg_sender", item.get("lastMsgSender", "")),
+                "last_sender_display_name": item.get(
+                    "last_sender_display_name",
+                    item.get("lastSenderDisplayName", ""),
+                ),
             }
             # Prefer the row with the newer sort timestamp for the same username.
             prev = realtime_rows_by_user.get(uname)
@@ -2087,7 +2623,7 @@ def _append_full_messages_from_rows(
         if is_group and sender_prefix and (not sender_username):
             sender_username = sender_prefix
 
-        if is_group and (raw_text.startswith("<") or raw_text.startswith('"<')):
+        if is_group and (not sender_username) and (raw_text.startswith("<") or raw_text.startswith('"<')):
             xml_sender = _extract_sender_from_group_xml(raw_text)
             if xml_sender:
                 sender_username = xml_sender
@@ -2123,6 +2659,9 @@ def _append_full_messages_from_rows(
         quote_username = ""
         quote_title = ""
         quote_content = ""
+        quote_thumb_url = ""
+        link_type = ""
+        link_style = ""
         quote_server_id = ""
         quote_type = ""
         quote_voice_length = ""
@@ -2137,11 +2676,7 @@ def _append_full_messages_from_rows(
 
         if local_type == 10000:
             render_type = "system"
-            if "revokemsg" in raw_text:
-                content_text = "撤回了一条消息"
-            else:
-                content_text = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", raw_text)
-                content_text = re.sub(r"\s+", " ", content_text).strip() or "[系统消息]"
+            content_text = _parse_system_message_content(raw_text)
         elif local_type == 49:
             parsed = _parse_app_message(raw_text)
             render_type = str(parsed.get("renderType") or "text")
@@ -2153,6 +2688,9 @@ def _append_full_messages_from_rows(
             record_item = str(parsed.get("recordItem") or "")
             quote_title = str(parsed.get("quoteTitle") or "")
             quote_content = str(parsed.get("quoteContent") or "")
+            quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+            link_type = str(parsed.get("linkType") or "")
+            link_style = str(parsed.get("linkStyle") or "")
             quote_username = str(parsed.get("quoteUsername") or "")
             quote_server_id = str(parsed.get("quoteServerId") or "")
             quote_type = str(parsed.get("quoteType") or "")
@@ -2196,6 +2734,9 @@ def _append_full_messages_from_rows(
             content_text = str(parsed.get("content") or "[引用消息]")
             quote_title = str(parsed.get("quoteTitle") or "")
             quote_content = str(parsed.get("quoteContent") or "")
+            quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+            link_type = str(parsed.get("linkType") or "")
+            link_style = str(parsed.get("linkStyle") or "")
             quote_username = str(parsed.get("quoteUsername") or "")
             quote_server_id = str(parsed.get("quoteServerId") or "")
             quote_type = str(parsed.get("quoteType") or "")
@@ -2308,6 +2849,20 @@ def _append_full_messages_from_rows(
                     local_id=local_id,
                     create_time=create_time,
                 )
+
+            # Some WeChat builds store the on-disk thumbnail basename (32-hex) in packed_info_data (protobuf),
+            # while the message XML only carries a long cdnthumburl file_id. Prefer packed_info_data when present.
+            if not _is_hex_md5(video_thumb_md5):
+                try:
+                    packed_val = r["packed_info_data"]
+                except Exception:
+                    try:
+                        packed_val = r.get("packed_info_data")  # type: ignore[attr-defined]
+                    except Exception:
+                        packed_val = None
+                packed_md5 = _extract_md5_from_packed_info(packed_val)
+                if packed_md5:
+                    video_thumb_md5 = packed_md5
             content_text = "[视频]"
         elif local_type == 47:
             render_type = "emoji"
@@ -2367,6 +2922,9 @@ def _append_full_messages_from_rows(
                             record_item = str(parsed.get("recordItem") or record_item)
                             quote_title = str(parsed.get("quoteTitle") or quote_title)
                             quote_content = str(parsed.get("quoteContent") or quote_content)
+                            quote_thumb_url = str(parsed.get("quoteThumbUrl") or quote_thumb_url)
+                            link_type = str(parsed.get("linkType") or link_type)
+                            link_style = str(parsed.get("linkStyle") or link_style)
                             amount = str(parsed.get("amount") or amount)
                             cover_url = str(parsed.get("coverUrl") or cover_url)
                             thumb_url = str(parsed.get("thumbUrl") or thumb_url)
@@ -2418,6 +2976,8 @@ def _append_full_messages_from_rows(
                 "content": content_text,
                 "title": title,
                 "url": url,
+                "linkType": link_type,
+                "linkStyle": link_style,
                 "from": from_name,
                 "fromUsername": from_username,
                 "recordItem": record_item,
@@ -2441,6 +3001,7 @@ def _append_full_messages_from_rows(
                 "quoteVoiceLength": str(quote_voice_length).strip(),
                 "quoteTitle": quote_title,
                 "quoteContent": quote_content,
+                "quoteThumbUrl": quote_thumb_url,
                 "amount": amount,
                 "coverUrl": cover_url,
                 "fileSize": file_size,
@@ -2459,6 +3020,197 @@ def _append_full_messages_from_rows(
             pass
 
 
+def _postprocess_transfer_messages(merged: list[dict[str, Any]]) -> None:
+    # 后处理：关联转账消息的最终状态
+    # 策略：优先使用 transferId 精确匹配，回退到金额+时间窗口匹配
+    # paysubtype 含义：1=不明确 3=已收款 4=对方退回给你 8=发起转账 9=被对方退回 10=已过期
+    #
+    # Windows 微信在部分场景会为同一笔转账记录两条消息：
+    # - paysubtype=1/8：发起/待收款（这里回填为“已被接收”）
+    # - paysubtype=3：收款确认（展示为“已收款”）
+    #
+    # 这两条消息的 isSent 并不能稳定表示“付款方/收款方视角”，因此这里以 transferId 关联结果为准：
+    # - 将原始转账消息（1/8）回填为“已被接收”
+    # - 若同一 transferId 同时存在原始消息与 paysubtype=3 消息，则将 paysubtype=3 的那条校正为“已收款”
+
+    def _is_transfer_expired_system_message(text: Any) -> bool:
+        content = str(text or "").strip()
+        if not content:
+            return False
+        if "转账" not in content or "过期" not in content:
+            return False
+        if "未接收" in content and ("24小时" in content or "二十四小时" in content):
+            return True
+        return "已过期" in content and ("收款方" in content or "转账" in content)
+
+    def _mark_pending_transfers_expired_by_system_messages() -> set[str]:
+        expired_system_times: list[int] = []
+        pending_candidates: list[tuple[int, int]] = []  # (index, createTime)
+
+        for idx, msg in enumerate(merged):
+            rt = str(msg.get("renderType") or "").strip()
+            if rt == "system":
+                if _is_transfer_expired_system_message(msg.get("content")):
+                    try:
+                        ts = int(msg.get("createTime") or 0)
+                    except Exception:
+                        ts = 0
+                    if ts > 0:
+                        expired_system_times.append(ts)
+                continue
+
+            if rt != "transfer":
+                continue
+
+            pst = str(msg.get("paySubType") or "").strip()
+            if pst not in ("1", "8"):
+                continue
+
+            try:
+                ts = int(msg.get("createTime") or 0)
+            except Exception:
+                ts = 0
+            if ts <= 0:
+                continue
+
+            pending_candidates.append((idx, ts))
+
+        if not expired_system_times or not pending_candidates:
+            return set()
+
+        used_pending_indexes: set[int] = set()
+        expired_transfer_ids: set[str] = set()
+
+        # 过期系统提示通常出现在转账发起约 24 小时后。
+        # 为避免误匹配，要求时间差落在 [22h, 26h] 范围内，并选择最接近 24h 的待收款消息。
+        for sys_ts in sorted(expired_system_times):
+            best_index = -1
+            best_distance = 10**9
+
+            for idx, transfer_ts in pending_candidates:
+                if idx in used_pending_indexes:
+                    continue
+                delta = sys_ts - transfer_ts
+                if delta < 0:
+                    continue
+                if delta < 22 * 3600 or delta > 26 * 3600:
+                    continue
+
+                distance = abs(delta - 24 * 3600)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = idx
+
+            if best_index < 0:
+                continue
+
+            used_pending_indexes.add(best_index)
+            transfer_msg = merged[best_index]
+            transfer_msg["paySubType"] = "10"
+            transfer_msg["transferStatus"] = "已过期"
+
+            tid = str(transfer_msg.get("transferId") or "").strip()
+            if tid:
+                expired_transfer_ids.add(tid)
+
+        return expired_transfer_ids
+
+    expired_transfer_ids = _mark_pending_transfers_expired_by_system_messages()
+
+    returned_transfer_ids: set[str] = set()  # 退还状态的 transferId
+    received_transfer_ids: set[str] = set()  # 已收款状态的 transferId
+    returned_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于退还回退匹配
+    received_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于收款回退匹配
+    pending_transfer_ids: set[str] = set()  # (paysubtype=1/8) 的 transferId，用于识别“收款确认”消息
+
+    for m in merged:
+        if m.get("renderType") != "transfer":
+            continue
+
+        pst = str(m.get("paySubType") or "")
+        tid = str(m.get("transferId") or "").strip()
+        amt = str(m.get("amount") or "")
+        ts = int(m.get("createTime") or 0)
+
+        if tid and pst in ("1", "8"):
+            pending_transfer_ids.add(tid)
+
+        if pst in ("4", "9"):  # 退还状态
+            if tid:
+                returned_transfer_ids.add(tid)
+            if amt:
+                returned_amounts_with_time.append((amt, ts))
+        elif pst == "3":  # 已收款状态
+            if tid:
+                received_transfer_ids.add(tid)
+            if amt:
+                received_amounts_with_time.append((amt, ts))
+
+    backfilled_message_ids: set[str] = set()
+
+    for m in merged:
+        if m.get("renderType") != "transfer":
+            continue
+
+        pst = str(m.get("paySubType") or "")
+        if pst not in ("1", "8"):
+            continue
+
+        tid = str(m.get("transferId") or "").strip()
+        amt = str(m.get("amount") or "")
+        ts = int(m.get("createTime") or 0)
+
+        should_mark_returned = False
+        should_mark_received = False
+
+        # 策略1：精确 transferId 匹配
+        if tid:
+            if tid in returned_transfer_ids:
+                should_mark_returned = True
+            elif tid in received_transfer_ids:
+                should_mark_received = True
+
+        # 策略2：回退到金额+时间窗口匹配（24小时内同金额）
+        if not should_mark_returned and not should_mark_received and amt:
+            for ret_amt, ret_ts in returned_amounts_with_time:
+                if ret_amt == amt and abs(ret_ts - ts) <= 86400:
+                    should_mark_returned = True
+                    break
+            if not should_mark_returned:
+                for rec_amt, rec_ts in received_amounts_with_time:
+                    if rec_amt == amt and abs(rec_ts - ts) <= 86400:
+                        should_mark_received = True
+                        break
+
+        if should_mark_returned:
+            m["paySubType"] = "9"
+            m["transferStatus"] = "已被退还"
+        elif should_mark_received:
+            m["paySubType"] = "3"
+            m["transferStatus"] = "已被接收"
+            mid = str(m.get("id") or "").strip()
+            if mid:
+                backfilled_message_ids.add(mid)
+
+    # 修正收款确认消息：当同一 transferId 同时存在原始转账消息（1/8）与收款消息（3）时，
+    # paysubtype=3 的那条通常是收款确认消息，状态文案应为“已收款”。
+    for m in merged:
+        if m.get("renderType") != "transfer":
+            continue
+        pst = str(m.get("paySubType") or "")
+        if pst != "3":
+            continue
+        tid = str(m.get("transferId") or "").strip()
+        if not tid or tid not in pending_transfer_ids:
+            continue
+        if tid in expired_transfer_ids:
+            continue
+        mid = str(m.get("id") or "").strip()
+        if mid and mid in backfilled_message_ids:
+            continue
+        m["transferStatus"] = "已收款"
+
+
 def _postprocess_full_messages(
     *,
     merged: list[dict[str, Any]],
@@ -2471,75 +3223,7 @@ def _postprocess_full_messages(
     contact_db_path: Path,
     head_image_db_path: Path,
 ) -> None:
-    # 后处理：关联转账消息的最终状态
-    # 策略：优先使用 transferId 精确匹配，回退到金额+时间窗口匹配
-    # paysubtype 含义：1=不明确 3=已收款 4=对方退回给你 8=发起转账 9=被对方退回 10=已过期
-
-    # 收集已退还和已收款的转账ID和金额
-    returned_transfer_ids: set[str] = set()  # 退还状态的 transferId
-    received_transfer_ids: set[str] = set()  # 已收款状态的 transferId
-    returned_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于退还回退匹配
-    received_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于收款回退匹配
-
-    for m in merged:
-        if m.get("renderType") == "transfer":
-            pst = str(m.get("paySubType") or "")
-            tid = str(m.get("transferId") or "").strip()
-            amt = str(m.get("amount") or "")
-            ts = int(m.get("createTime") or 0)
-
-            if pst in ("4", "9"):  # 退还状态
-                if tid:
-                    returned_transfer_ids.add(tid)
-                if amt:
-                    returned_amounts_with_time.append((amt, ts))
-            elif pst == "3":  # 已收款状态
-                if tid:
-                    received_transfer_ids.add(tid)
-                if amt:
-                    received_amounts_with_time.append((amt, ts))
-
-    # 更新原始转账消息的状态
-    for m in merged:
-        if m.get("renderType") == "transfer":
-            pst = str(m.get("paySubType") or "")
-            # 只更新未确定状态的原始转账消息（paysubtype=1 或 8）
-            if pst in ("1", "8"):
-                tid = str(m.get("transferId") or "").strip()
-                amt = str(m.get("amount") or "")
-                ts = int(m.get("createTime") or 0)
-
-                # 优先检查退还状态（退还优先于收款）
-                should_mark_returned = False
-                should_mark_received = False
-
-                # 策略1：精确 transferId 匹配
-                if tid:
-                    if tid in returned_transfer_ids:
-                        should_mark_returned = True
-                    elif tid in received_transfer_ids:
-                        should_mark_received = True
-
-                # 策略2：回退到金额+时间窗口匹配（24小时内同金额）
-                if not should_mark_returned and not should_mark_received and amt:
-                    for ret_amt, ret_ts in returned_amounts_with_time:
-                        if ret_amt == amt and abs(ret_ts - ts) <= 86400:
-                            should_mark_returned = True
-                            break
-                    if not should_mark_returned:
-                        for rec_amt, rec_ts in received_amounts_with_time:
-                            if rec_amt == amt and abs(rec_ts - ts) <= 86400:
-                                should_mark_received = True
-                                break
-
-                if should_mark_returned:
-                    m["paySubType"] = "9"
-                    m["transferStatus"] = "已被退还"
-                elif should_mark_received:
-                    m["paySubType"] = "3"
-                    # 根据 isSent 判断：发起方显示"已收款"，收款方显示"已被接收"
-                    is_sent = m.get("isSent", False)
-                    m["transferStatus"] = "已收款" if is_sent else "已被接收"
+    _postprocess_transfer_messages(merged)
 
     # Some appmsg payloads provide only `from` (sourcedisplayname) but not `fromUsername` (sourceusername).
     # Recover `fromUsername` via contact.db so the frontend can render the publisher avatar.
@@ -2598,6 +3282,13 @@ def _postprocess_full_messages(
         wcdb_display_names = {}
         wcdb_avatar_urls = {}
 
+    group_nicknames = _load_group_nickname_map(
+        account_dir=account_dir,
+        contact_db_path=contact_db_path,
+        chatroom_id=username,
+        sender_usernames=uniq_senders,
+    )
+
     for m in merged:
         # If appmsg doesn't provide sourcedisplayname, try mapping sourceusername to display name.
         if (not str(m.get("from") or "").strip()) and str(m.get("fromUsername") or "").strip():
@@ -2613,13 +3304,12 @@ def _postprocess_full_messages(
         su = str(m.get("senderUsername") or "")
         if not su:
             continue
-        row = sender_contact_rows.get(su)
-        display_name = _pick_display_name(row, su)
-        if display_name == su:
-            wd = str(wcdb_display_names.get(su) or "").strip()
-            if wd and wd != su:
-                display_name = wd
-        m["senderDisplayName"] = display_name
+        m["senderDisplayName"] = _resolve_sender_display_name(
+            sender_username=su,
+            sender_contact_rows=sender_contact_rows,
+            wcdb_display_names=wcdb_display_names,
+            group_nicknames=group_nicknames,
+        )
         avatar_url = base_url + _avatar_url_unified(
             account_dir=account_dir,
             username=su,
@@ -2726,6 +3416,27 @@ def _postprocess_full_messages(
                         m["videoUrl"] = (
                             base_url
                             + f"/api/chat/media/video?account={quote(account_dir.name)}&file_id={quote(video_file_id)}&username={quote(username)}"
+                        )
+            elif rt == "link":
+                # Some appmsg link cards (notably Bilibili shares) carry a non-HTTP `<thumburl>` payload
+                # (often an ASN.1-ish hex blob). The actual preview image is typically saved as:
+                #   msg/attach/{md5(conv_username)}/.../Img/{local_id}_{create_time}_t.dat
+                # Expose it via the existing image endpoint using file_id.
+                thumb_url = str(m.get("thumbUrl") or "").strip()
+                if thumb_url and (not thumb_url.lower().startswith(("http://", "https://"))):
+                    try:
+                        lid = int(m.get("localId") or 0)
+                    except Exception:
+                        lid = 0
+                    try:
+                        ct = int(m.get("createTime") or 0)
+                    except Exception:
+                        ct = 0
+                    if lid > 0 and ct > 0:
+                        file_id = f"{lid}_{ct}"
+                        m["thumbUrl"] = (
+                            base_url
+                            + f"/api/chat/media/image?account={quote(account_dir.name)}&file_id={quote(file_id)}&username={quote(username)}"
                         )
             elif rt == "voice":
                 if str(m.get("serverId") or ""):
@@ -2836,6 +3547,17 @@ def list_chat_sessions(
                     "sort_timestamp": item.get("sort_timestamp", item.get("sortTimestamp", item.get("last_timestamp", 0))),
                     "last_msg_type": item.get("last_msg_type", item.get("lastMsgType", 0)),
                     "last_msg_sub_type": item.get("last_msg_sub_type", item.get("lastMsgSubType", 0)),
+                    # Keep these fields so group session previews can render "sender: content" without
+                    # crashing (realtime rows are dicts, not sqlite Rows).
+                    "last_msg_sender": item.get("last_msg_sender", item.get("lastMsgSender", "")),
+                    "last_sender_display_name": item.get(
+                        "last_sender_display_name",
+                        item.get("lastSenderDisplayName", ""),
+                    ),
+                    "last_msg_locald_id": item.get(
+                        "last_msg_locald_id",
+                        item.get("lastMsgLocaldId", item.get("lastMsgLocalId", 0)),
+                    ),
                 }
             )
 
@@ -2897,20 +3619,45 @@ def list_chat_sessions(
         finally:
             sconn.close()
 
-    filtered: list[sqlite3.Row] = []
-    usernames: list[str] = []
+    filtered: list[Any] = []
     for r in rows:
-        username = r["username"] or ""
+        username = _session_row_get(r, "username", "") or ""
         if not username:
             continue
-        if not include_hidden and int(r["is_hidden"] or 0) == 1:
+        if not include_hidden and int((_session_row_get(r, "is_hidden", 0) or 0)) == 1:
             continue
         if not _should_keep_session(username, include_official=include_official):
             continue
         filtered.append(r)
-        usernames.append(username)
-        if len(filtered) >= int(limit):
-            break
+
+    raw_usernames = [str(_session_row_get(r, "username", "") or "").strip() for r in filtered]
+    top_flags = _load_contact_top_flags(contact_db_path, raw_usernames)
+
+    def _to_int(v: Any) -> int:
+        try:
+            return int(v or 0)
+        except Exception:
+            return 0
+
+    def _session_sort_key(row: Any) -> tuple[int, int, int]:
+        username = str(_session_row_get(row, "username", "") or "").strip()
+        sort_ts = _to_int(_session_row_get(row, "sort_timestamp", 0))
+        last_ts = _to_int(_session_row_get(row, "last_timestamp", 0))
+        return (
+            1 if bool(top_flags.get(username, False)) else 0,
+            sort_ts,
+            last_ts,
+        )
+
+    filtered.sort(key=_session_sort_key, reverse=True)
+    if len(filtered) > int(limit):
+        filtered = filtered[: int(limit)]
+
+    usernames: list[str] = []
+    for r in filtered:
+        username = str(_session_row_get(r, "username", "") or "").strip()
+        if username:
+            usernames.append(username)
 
     contact_rows = _load_contact_rows(contact_db_path, usernames)
     local_avatar_usernames = _query_head_image_usernames(head_image_db_path, usernames)
@@ -2923,12 +3670,16 @@ def list_chat_sessions(
     try:
         need_display: list[str] = []
         need_avatar: list[str] = []
+        if source_norm == "realtime":
+            # In realtime mode, always ask WCDB for display names: decrypted contact.db can be stale.
+            need_display = [str(u or "").strip() for u in usernames if str(u or "").strip()]
         for u in usernames:
             if not u:
                 continue
-            row = contact_rows.get(u)
-            if _pick_display_name(row, u) == u:
-                need_display.append(u)
+            if source_norm != "realtime":
+                row = contact_rows.get(u)
+                if _pick_display_name(row, u) == u:
+                    need_display.append(u)
             if source_norm == "realtime":
                 # In realtime mode, prefer WCDB-resolved avatar URLs (contact.db can be stale).
                 if u not in local_avatar_usernames:
@@ -2940,12 +3691,20 @@ def list_chat_sessions(
         need_display = list(dict.fromkeys(need_display))
         need_avatar = list(dict.fromkeys(need_avatar))
         if need_display or need_avatar:
-            wcdb_conn = rt_conn or WCDB_REALTIME.ensure_connected(account_dir)
-            with wcdb_conn.lock:
-                if need_display:
-                    wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-                if need_avatar:
-                    wcdb_avatar_urls = _wcdb_get_avatar_urls(wcdb_conn.handle, need_avatar)
+            wcdb_conn = rt_conn
+            if wcdb_conn is None:
+                status = WCDB_REALTIME.get_status(account_dir)
+                can_connect = bool(status.get("dll_present")) and bool(status.get("key_present")) and bool(
+                    status.get("session_db_path")
+                )
+                if can_connect:
+                    wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+            if wcdb_conn is not None:
+                with wcdb_conn.lock:
+                    if need_display:
+                        wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
+                    if need_avatar:
+                        wcdb_avatar_urls = _wcdb_get_avatar_urls(wcdb_conn.handle, need_avatar)
     except Exception:
         wcdb_display_names = {}
         wcdb_avatar_urls = {}
@@ -2983,14 +3742,40 @@ def list_chat_sessions(
                 if v:
                     last_previews[u] = v
 
+    group_sender_display_names: dict[str, str] = _build_group_sender_display_name_map(
+        contact_db_path,
+        last_previews,
+    )
+    unresolved = []
+    for conv_username, preview_text in last_previews.items():
+        if not str(conv_username or "").endswith("@chatroom"):
+            continue
+        sender_username = _extract_group_preview_sender_username(preview_text)
+        if sender_username and sender_username not in group_sender_display_names:
+            unresolved.append(sender_username)
+    unresolved = list(dict.fromkeys(unresolved))
+    if unresolved:
+        try:
+            wcdb_conn = rt_conn or WCDB_REALTIME.ensure_connected(account_dir)
+            with wcdb_conn.lock:
+                wcdb_names = _wcdb_get_display_names(wcdb_conn.handle, unresolved)
+            for sender_username in unresolved:
+                wcdb_name = str(wcdb_names.get(sender_username) or "").strip()
+                if wcdb_name and wcdb_name != sender_username:
+                    group_sender_display_names[sender_username] = wcdb_name
+        except Exception:
+            pass
+
     sessions: list[dict[str, Any]] = []
     for r in filtered:
         username = r["username"]
         c_row = contact_rows.get(username)
 
         display_name = _pick_display_name(c_row, username)
-        if display_name == username:
-            wd = str(wcdb_display_names.get(username) or "").strip()
+        wd = str(wcdb_display_names.get(username) or "").strip()
+        if source_norm == "realtime" and wd and wd != username:
+            display_name = wd
+        elif display_name == username:
             if wd and wd != username:
                 display_name = wd
 
@@ -3046,6 +3831,37 @@ def list_chat_sessions(
             if last_msg_type == 81604378673 or (last_msg_type == 49 and last_msg_sub_type == 19):
                 last_message = "[聊天记录]"
 
+        last_message = _normalize_session_preview_text(
+            last_message,
+            is_group=bool(str(username or "").endswith("@chatroom")),
+            sender_display_names=group_sender_display_names,
+        )
+        if str(username or "").endswith("@chatroom") and str(last_message or "") and not str(last_message).startswith("[草稿]"):
+            # Prefer group card nickname when available. In realtime mode, WCDB session rows can provide
+            # `last_sender_display_name`, but we may still get a summary that doesn't include "sender:".
+            # Also guard against URL schemes like "https://..." being mis-parsed as "https: //...".
+            raw_sender_display = ""
+            try:
+                raw_sender_display = r["last_sender_display_name"]
+            except Exception:
+                try:
+                    raw_sender_display = r.get("last_sender_display_name", "")
+                except Exception:
+                    raw_sender_display = ""
+            sender_display = _decode_sqlite_text(raw_sender_display).strip()
+            if sender_display:
+                text = re.sub(r"\s+", " ", str(last_message or "").strip()).strip()
+                match = re.match(r"^([^:\n]{1,128}):\s*(.+)$", text)
+                if match:
+                    prefix = str(match.group(1) or "").strip()
+                    body = re.sub(r"\s+", " ", str(match.group(2) or "").strip()).strip()
+                    if prefix.lower() in {"http", "https"} and body.startswith("//"):
+                        last_message = f"{sender_display}: {text}"
+                    else:
+                        last_message = f"{sender_display}: {body}"
+                else:
+                    last_message = f"{sender_display}: {text}"
+
         last_time = _format_session_time(r["sort_timestamp"] or r["last_timestamp"])
 
         sessions.append(
@@ -3058,6 +3874,7 @@ def list_chat_sessions(
                 "lastMessageTime": last_time,
                 "unreadCount": int(r["unread_count"] or 0),
                 "isGroup": bool(username.endswith("@chatroom")),
+                "isTop": bool(top_flags.get(str(username or "").strip(), False)),
             }
         )
 
@@ -3201,7 +4018,7 @@ def _collect_chat_messages(
                 if is_group and sender_prefix and (not sender_username):
                     sender_username = sender_prefix
 
-                if is_group and (raw_text.startswith("<") or raw_text.startswith('"<')):
+                if is_group and (not sender_username) and (raw_text.startswith("<") or raw_text.startswith('"<')):
                     xml_sender = _extract_sender_from_group_xml(raw_text)
                     if xml_sender:
                         sender_username = xml_sender
@@ -3234,6 +4051,9 @@ def _collect_chat_messages(
                 quote_username = ""
                 quote_title = ""
                 quote_content = ""
+                quote_thumb_url = ""
+                link_type = ""
+                link_style = ""
                 quote_server_id = ""
                 quote_type = ""
                 quote_voice_length = ""
@@ -3248,13 +4068,7 @@ def _collect_chat_messages(
 
                 if local_type == 10000:
                     render_type = "system"
-                    if "revokemsg" in raw_text:
-                        content_text = "撤回了一条消息"
-                    else:
-                        import re
-
-                        content_text = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", raw_text)
-                        content_text = re.sub(r"\s+", " ", content_text).strip() or "[系统消息]"
+                    content_text = _parse_system_message_content(raw_text)
                 elif local_type == 49:
                     parsed = _parse_app_message(raw_text)
                     render_type = str(parsed.get("renderType") or "text")
@@ -3266,6 +4080,9 @@ def _collect_chat_messages(
                     record_item = str(parsed.get("recordItem") or "")
                     quote_title = str(parsed.get("quoteTitle") or "")
                     quote_content = str(parsed.get("quoteContent") or "")
+                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+                    link_type = str(parsed.get("linkType") or "")
+                    link_style = str(parsed.get("linkStyle") or "")
                     quote_username = str(parsed.get("quoteUsername") or "")
                     quote_server_id = str(parsed.get("quoteServerId") or "")
                     quote_type = str(parsed.get("quoteType") or "")
@@ -3309,6 +4126,9 @@ def _collect_chat_messages(
                     content_text = str(parsed.get("content") or "[引用消息]")
                     quote_title = str(parsed.get("quoteTitle") or "")
                     quote_content = str(parsed.get("quoteContent") or "")
+                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+                    link_type = str(parsed.get("linkType") or "")
+                    link_style = str(parsed.get("linkStyle") or "")
                     quote_username = str(parsed.get("quoteUsername") or "")
                     quote_server_id = str(parsed.get("quoteServerId") or "")
                     quote_type = str(parsed.get("quoteType") or "")
@@ -3408,6 +4228,11 @@ def _collect_chat_messages(
                             local_id=local_id,
                             create_time=create_time,
                         )
+
+                    if not _is_hex_md5(video_thumb_md5):
+                        packed_md5 = _extract_md5_from_packed_info(r["packed_info_data"])
+                        if packed_md5:
+                            video_thumb_md5 = packed_md5
                     content_text = "[视频]"
                 elif local_type == 47:
                     render_type = "emoji"
@@ -3469,6 +4294,9 @@ def _collect_chat_messages(
                                     record_item = str(parsed.get("recordItem") or record_item)
                                     quote_title = str(parsed.get("quoteTitle") or quote_title)
                                     quote_content = str(parsed.get("quoteContent") or quote_content)
+                                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or quote_thumb_url)
+                                    link_type = str(parsed.get("linkType") or link_type)
+                                    link_style = str(parsed.get("linkStyle") or link_style)
                                     amount = str(parsed.get("amount") or amount)
                                     cover_url = str(parsed.get("coverUrl") or cover_url)
                                     thumb_url = str(parsed.get("thumbUrl") or thumb_url)
@@ -3526,6 +4354,8 @@ def _collect_chat_messages(
                         "content": content_text,
                         "title": title,
                         "url": url,
+                        "linkType": link_type,
+                        "linkStyle": link_style,
                         "from": from_name,
                         "fromUsername": from_username,
                         "recordItem": record_item,
@@ -3549,6 +4379,7 @@ def _collect_chat_messages(
                         "quoteVoiceLength": str(quote_voice_length).strip(),
                         "quoteTitle": quote_title,
                         "quoteContent": quote_content,
+                        "quoteThumbUrl": quote_thumb_url,
                         "amount": amount,
                         "coverUrl": cover_url,
                         "fileSize": file_size,
@@ -3569,6 +4400,182 @@ def _collect_chat_messages(
             pass
 
     return merged, has_more_any, sender_usernames, quote_usernames, pat_usernames
+
+
+@router.get("/api/chat/messages/daily_counts", summary="获取某月每日消息数（热力图）")
+def get_chat_message_daily_counts(
+    username: str,
+    year: int,
+    month: int,
+    account: Optional[str] = None,
+):
+    username = str(username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username.")
+    try:
+        y = int(year)
+        m = int(month)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid year or month.")
+    if m < 1 or m > 12:
+        raise HTTPException(status_code=400, detail="Invalid month.")
+
+    try:
+        start_ts, end_ts = _local_month_range_epoch_seconds(year=y, month=m)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid year or month.")
+
+    account_dir = _resolve_account_dir(account)
+    db_paths = _iter_message_db_paths(account_dir)
+
+    counts: dict[str, int] = {}
+
+    for db_path in db_paths:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            try:
+                table_name = _resolve_msg_table_name(conn, username)
+                if not table_name:
+                    continue
+                quoted_table = _quote_ident(table_name)
+                rows = conn.execute(
+                    "SELECT strftime('%Y-%m-%d', CAST(create_time AS INTEGER), 'unixepoch', 'localtime') AS day, "
+                    "COUNT(*) AS c "
+                    f"FROM {quoted_table} "
+                    "WHERE CAST(create_time AS INTEGER) >= ? AND CAST(create_time AS INTEGER) < ? "
+                    "GROUP BY day",
+                    (int(start_ts), int(end_ts)),
+                ).fetchall()
+                for day, c in rows:
+                    k = str(day or "").strip()
+                    if not k:
+                        continue
+                    try:
+                        vv = int(c or 0)
+                    except Exception:
+                        vv = 0
+                    if vv <= 0:
+                        continue
+                    counts[k] = int(counts.get(k, 0)) + vv
+            except Exception:
+                continue
+        finally:
+            conn.close()
+
+    total = int(sum(int(v) for v in counts.values())) if counts else 0
+    max_count = int(max(counts.values())) if counts else 0
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "username": username,
+        "year": int(y),
+        "month": int(m),
+        "counts": counts,
+        "total": total,
+        "max": max_count,
+    }
+
+
+@router.get("/api/chat/messages/anchor", summary="获取定位锚点（某日第一条/会话顶部）")
+def get_chat_message_anchor(
+    username: str,
+    kind: str,
+    account: Optional[str] = None,
+    date: Optional[str] = None,
+):
+    username = str(username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username.")
+
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm not in {"day", "first"}:
+        raise HTTPException(status_code=400, detail="Invalid kind.")
+
+    date_norm: Optional[str] = None
+    start_ts: Optional[int] = None
+    end_ts: Optional[int] = None
+    if kind_norm == "day":
+        if not date:
+            raise HTTPException(status_code=400, detail="Missing date.")
+        try:
+            start_ts, end_ts, date_norm = _local_day_range_epoch_seconds(date_str=str(date))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid date.")
+
+    account_dir = _resolve_account_dir(account)
+    db_paths = _iter_message_db_paths(account_dir)
+
+    best_key: Optional[tuple[int, int, int]] = None
+    best_anchor_id = ""
+    best_create_time = 0
+
+    for db_path in db_paths:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            try:
+                table_name = _resolve_msg_table_name(conn, username)
+                if not table_name:
+                    continue
+                quoted_table = _quote_ident(table_name)
+
+                if kind_norm == "first":
+                    row = conn.execute(
+                        "SELECT local_id, CAST(create_time AS INTEGER) AS create_time, "
+                        "COALESCE(CAST(sort_seq AS INTEGER), 0) AS sort_seq "
+                        f"FROM {quoted_table} "
+                        "ORDER BY CAST(create_time AS INTEGER) ASC, COALESCE(CAST(sort_seq AS INTEGER), 0) ASC, local_id ASC "
+                        "LIMIT 1"
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT local_id, CAST(create_time AS INTEGER) AS create_time, "
+                        "COALESCE(CAST(sort_seq AS INTEGER), 0) AS sort_seq "
+                        f"FROM {quoted_table} "
+                        "WHERE CAST(create_time AS INTEGER) >= ? AND CAST(create_time AS INTEGER) < ? "
+                        "ORDER BY CAST(create_time AS INTEGER) ASC, COALESCE(CAST(sort_seq AS INTEGER), 0) ASC, local_id ASC "
+                        "LIMIT 1",
+                        (int(start_ts or 0), int(end_ts or 0)),
+                    ).fetchone()
+
+                if not row:
+                    continue
+                try:
+                    local_id = int(row[0] or 0)
+                    create_time = int(row[1] or 0)
+                    sort_seq = int(row[2] or 0)
+                except Exception:
+                    continue
+                if local_id <= 0:
+                    continue
+
+                key = (int(create_time), int(sort_seq), int(local_id))
+                if (best_key is None) or (key < best_key):
+                    best_key = key
+                    best_create_time = int(create_time)
+                    best_anchor_id = f"{db_path.stem}:{table_name}:{local_id}"
+            except Exception:
+                continue
+        finally:
+            conn.close()
+
+    if not best_anchor_id:
+        return {
+            "status": "empty",
+            "anchorId": "",
+        }
+
+    resp: dict[str, Any] = {
+        "status": "success",
+        "account": account_dir.name,
+        "username": username,
+        "kind": kind_norm,
+        "anchorId": best_anchor_id,
+        "createTime": int(best_create_time),
+    }
+    if date_norm is not None:
+        resp["date"] = date_norm
+    return resp
 
 
 @router.get("/api/chat/messages", summary="获取会话消息列表")
@@ -3907,7 +4914,7 @@ def list_chat_messages(
                 if is_group and sender_prefix:
                     sender_username = sender_prefix
 
-                if is_group and (raw_text.startswith("<") or raw_text.startswith('"<')):
+                if is_group and (not sender_username) and (raw_text.startswith("<") or raw_text.startswith('"<')):
                     xml_sender = _extract_sender_from_group_xml(raw_text)
                     if xml_sender:
                         sender_username = xml_sender
@@ -3943,6 +4950,9 @@ def list_chat_messages(
                 quote_username = ""
                 quote_title = ""
                 quote_content = ""
+                quote_thumb_url = ""
+                link_type = ""
+                link_style = ""
                 quote_server_id = ""
                 quote_type = ""
                 quote_voice_length = ""
@@ -3957,13 +4967,7 @@ def list_chat_messages(
 
                 if local_type == 10000:
                     render_type = "system"
-                    if "revokemsg" in raw_text:
-                        content_text = "撤回了一条消息"
-                    else:
-                        import re
-
-                        content_text = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", raw_text)
-                        content_text = re.sub(r"\s+", " ", content_text).strip() or "[系统消息]"
+                    content_text = _parse_system_message_content(raw_text)
                 elif local_type == 49:
                     parsed = _parse_app_message(raw_text)
                     render_type = str(parsed.get("renderType") or "text")
@@ -3975,6 +4979,9 @@ def list_chat_messages(
                     record_item = str(parsed.get("recordItem") or "")
                     quote_title = str(parsed.get("quoteTitle") or "")
                     quote_content = str(parsed.get("quoteContent") or "")
+                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+                    link_type = str(parsed.get("linkType") or "")
+                    link_style = str(parsed.get("linkStyle") or "")
                     quote_username = str(parsed.get("quoteUsername") or "")
                     quote_server_id = str(parsed.get("quoteServerId") or "")
                     quote_type = str(parsed.get("quoteType") or "")
@@ -4018,6 +5025,9 @@ def list_chat_messages(
                     content_text = str(parsed.get("content") or "[引用消息]")
                     quote_title = str(parsed.get("quoteTitle") or "")
                     quote_content = str(parsed.get("quoteContent") or "")
+                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or "")
+                    link_type = str(parsed.get("linkType") or "")
+                    link_style = str(parsed.get("linkStyle") or "")
                     quote_username = str(parsed.get("quoteUsername") or "")
                     quote_server_id = str(parsed.get("quoteServerId") or "")
                     quote_type = str(parsed.get("quoteType") or "")
@@ -4174,6 +5184,9 @@ def list_chat_messages(
                                     record_item = str(parsed.get("recordItem") or record_item)
                                     quote_title = str(parsed.get("quoteTitle") or quote_title)
                                     quote_content = str(parsed.get("quoteContent") or quote_content)
+                                    quote_thumb_url = str(parsed.get("quoteThumbUrl") or quote_thumb_url)
+                                    link_type = str(parsed.get("linkType") or link_type)
+                                    link_style = str(parsed.get("linkStyle") or link_style)
                                     amount = str(parsed.get("amount") or amount)
                                     cover_url = str(parsed.get("coverUrl") or cover_url)
                                     thumb_url = str(parsed.get("thumbUrl") or thumb_url)
@@ -4224,6 +5237,8 @@ def list_chat_messages(
                         "content": content_text,
                         "title": title,
                         "url": url,
+                        "linkType": link_type,
+                        "linkStyle": link_style,
                         "from": from_name,
                         "fromUsername": from_username,
                         "recordItem": record_item,
@@ -4247,6 +5262,7 @@ def list_chat_messages(
                         "quoteVoiceLength": str(quote_voice_length).strip(),
                         "quoteTitle": quote_title,
                         "quoteContent": quote_content,
+                        "quoteThumbUrl": quote_thumb_url,
                         "amount": amount,
                         "coverUrl": cover_url,
                         "fileSize": file_size,
@@ -4283,81 +5299,38 @@ def list_chat_messages(
             deduped.append(m)
         merged = deduped
 
-    # 后处理：关联转账消息的最终状态
-    # 策略：优先使用 transferId 精确匹配，回退到金额+时间窗口匹配
-    # paysubtype 含义：1=不明确 3=已收款 4=对方退回给你 8=发起转账 9=被对方退回 10=已过期
+    _postprocess_transfer_messages(merged)
 
-    # 收集已退还和已收款的转账ID和金额
-    returned_transfer_ids: set[str] = set()  # 退还状态的 transferId
-    received_transfer_ids: set[str] = set()  # 已收款状态的 transferId
-    returned_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于退还回退匹配
-    received_amounts_with_time: list[tuple[str, int]] = []  # (金额, 时间戳) 用于收款回退匹配
+    def sort_key(m: dict[str, Any]) -> tuple[int, int, int]:
+        sseq = int(m.get("sortSeq") or 0)
+        cts = int(m.get("createTime") or 0)
+        lid = int(m.get("localId") or 0)
+        return (cts, sseq, lid)
 
-    for m in merged:
-        if m.get("renderType") == "transfer":
-            pst = str(m.get("paySubType") or "")
-            tid = str(m.get("transferId") or "").strip()
-            amt = str(m.get("amount") or "")
-            ts = int(m.get("createTime") or 0)
+    merged.sort(key=sort_key, reverse=True)
+    has_more_global = bool(has_more_any or (len(merged) > (int(offset) + int(limit))))
+    page = merged[int(offset) : int(offset) + int(limit)]
+    if want_asc:
+        page = list(reversed(page))
 
-            if pst in ("4", "9"):  # 退还状态
-                if tid:
-                    returned_transfer_ids.add(tid)
-                if amt:
-                    returned_amounts_with_time.append((amt, ts))
-            elif pst == "3":  # 已收款状态
-                if tid:
-                    received_transfer_ids.add(tid)
-                if amt:
-                    received_amounts_with_time.append((amt, ts))
+    # Hot path optimization: only enrich the page we return.
+    if not page:
+        return {
+            "status": "success",
+            "account": account_dir.name,
+            "username": username,
+            "total": int(offset) + (1 if has_more_global else 0),
+            "hasMore": bool(has_more_global),
+            "messages": [],
+        }
 
-    # 更新原始转账消息的状态
-    for m in merged:
-        if m.get("renderType") == "transfer":
-            pst = str(m.get("paySubType") or "")
-            # 只更新未确定状态的原始转账消息（paysubtype=1 或 8）
-            if pst in ("1", "8"):
-                tid = str(m.get("transferId") or "").strip()
-                amt = str(m.get("amount") or "")
-                ts = int(m.get("createTime") or 0)
-
-                # 优先检查退还状态（退还优先于收款）
-                should_mark_returned = False
-                should_mark_received = False
-
-                # 策略1：精确 transferId 匹配
-                if tid:
-                    if tid in returned_transfer_ids:
-                        should_mark_returned = True
-                    elif tid in received_transfer_ids:
-                        should_mark_received = True
-
-                # 策略2：回退到金额+时间窗口匹配（24小时内同金额）
-                if not should_mark_returned and not should_mark_received and amt:
-                    for ret_amt, ret_ts in returned_amounts_with_time:
-                        if ret_amt == amt and abs(ret_ts - ts) <= 86400:
-                            should_mark_returned = True
-                            break
-                    if not should_mark_returned:
-                        for rec_amt, rec_ts in received_amounts_with_time:
-                            if rec_amt == amt and abs(rec_ts - ts) <= 86400:
-                                should_mark_received = True
-                                break
-
-                if should_mark_returned:
-                    m["paySubType"] = "9"
-                    m["transferStatus"] = "已被退还"
-                elif should_mark_received:
-                    m["paySubType"] = "3"
-                    # 根据 isSent 判断：发起方显示"已收款"，收款方显示"已被接收"
-                    is_sent = m.get("isSent", False)
-                    m["transferStatus"] = "已收款" if is_sent else "已被接收"
+    messages_window = page
 
     # Some appmsg payloads provide only `from` (sourcedisplayname) but not `fromUsername` (sourceusername).
     # Recover `fromUsername` via contact.db so the frontend can render the publisher avatar.
     missing_from_names = [
         str(m.get("from") or "").strip()
-        for m in merged
+        for m in messages_window
         if str(m.get("renderType") or "").strip() == "link"
         and str(m.get("from") or "").strip()
         and not str(m.get("fromUsername") or "").strip()
@@ -4365,7 +5338,7 @@ def list_chat_messages(
     if missing_from_names:
         name_to_username = _load_usernames_by_display_names(contact_db_path, missing_from_names)
         if name_to_username:
-            for m in merged:
+            for m in messages_window:
                 if str(m.get("fromUsername") or "").strip():
                     continue
                 if str(m.get("renderType") or "").strip() != "link":
@@ -4374,10 +5347,33 @@ def list_chat_messages(
                 if fn and fn in name_to_username:
                     m["fromUsername"] = name_to_username[fn]
 
-    from_usernames = [str(m.get("fromUsername") or "").strip() for m in merged]
+    pat_usernames_in_page: set[str] = set()
+    for m in messages_window:
+        if int(m.get("type") or 0) != 266287972401:
+            continue
+        raw = str(m.get("_rawText") or "")
+        if not raw:
+            continue
+        template = _extract_xml_tag_text(raw, "template")
+        if not template:
+            continue
+        pat_usernames_in_page.update({mm.group(1) for mm in re.finditer(r"\$\{([^}]+)\}", template) if mm.group(1)})
+
+    from_usernames = [str(m.get("fromUsername") or "").strip() for m in messages_window]
+    sender_usernames_in_page = [str(m.get("senderUsername") or "").strip() for m in messages_window]
+    quote_usernames_in_page = [str(m.get("quoteUsername") or "").strip() for m in messages_window]
     uniq_senders = list(
         dict.fromkeys(
-            [u for u in (sender_usernames + list(pat_usernames) + quote_usernames + from_usernames) if u]
+            [
+                u
+                for u in (
+                    sender_usernames_in_page
+                    + list(pat_usernames_in_page)
+                    + quote_usernames_in_page
+                    + from_usernames
+                )
+                if u
+            ]
         )
     )
     sender_contact_rows = _load_contact_rows(contact_db_path, uniq_senders)
@@ -4412,7 +5408,14 @@ def list_chat_messages(
         wcdb_display_names = {}
         wcdb_avatar_urls = {}
 
-    for m in merged:
+    group_nicknames = _load_group_nickname_map(
+        account_dir=account_dir,
+        contact_db_path=contact_db_path,
+        chatroom_id=username,
+        sender_usernames=uniq_senders,
+    )
+
+    for m in messages_window:
         # If appmsg doesn't provide sourcedisplayname, try mapping sourceusername to display name.
         if (not str(m.get("from") or "").strip()) and str(m.get("fromUsername") or "").strip():
             fu = str(m.get("fromUsername") or "").strip()
@@ -4427,13 +5430,12 @@ def list_chat_messages(
         su = str(m.get("senderUsername") or "")
         if not su:
             continue
-        row = sender_contact_rows.get(su)
-        display_name = _pick_display_name(row, su)
-        if display_name == su:
-            wd = str(wcdb_display_names.get(su) or "").strip()
-            if wd and wd != su:
-                display_name = wd
-        m["senderDisplayName"] = display_name
+        m["senderDisplayName"] = _resolve_sender_display_name(
+            sender_username=su,
+            sender_contact_rows=sender_contact_rows,
+            wcdb_display_names=wcdb_display_names,
+            group_nicknames=group_nicknames,
+        )
         avatar_url = base_url + _avatar_url_unified(
             account_dir=account_dir,
             username=su,
@@ -4492,8 +5494,6 @@ def list_chat_messages(
 
                     if existing_local:
                         try:
-                            import re
-
                             cur = str(m.get("emojiUrl") or "")
                             if cur and re.match(r"^https?://", cur, flags=re.I) and ("/api/chat/media/emoji" not in cur):
                                 m["emojiRemoteUrl"] = cur
@@ -4541,6 +5541,23 @@ def list_chat_messages(
                             base_url
                             + f"/api/chat/media/video?account={quote(account_dir.name)}&file_id={quote(video_file_id)}&username={quote(username)}"
                         )
+            elif rt == "link":
+                thumb_url = str(m.get("thumbUrl") or "").strip()
+                if thumb_url and (not thumb_url.lower().startswith(("http://", "https://"))):
+                    try:
+                        lid = int(m.get("localId") or 0)
+                    except Exception:
+                        lid = 0
+                    try:
+                        ct = int(m.get("createTime") or 0)
+                    except Exception:
+                        ct = 0
+                    if lid > 0 and ct > 0:
+                        file_id = f"{lid}_{ct}"
+                        m["thumbUrl"] = (
+                            base_url
+                            + f"/api/chat/media/image?account={quote(account_dir.name)}&file_id={quote(file_id)}&username={quote(username)}"
+                        )
             elif rt == "voice":
                 if str(m.get("serverId") or ""):
                     sid = int(m.get("serverId") or 0)
@@ -4556,18 +5573,6 @@ def list_chat_messages(
 
         if "_rawText" in m:
             m.pop("_rawText", None)
-
-    def sort_key(m: dict[str, Any]) -> tuple[int, int, int]:
-        sseq = int(m.get("sortSeq") or 0)
-        cts = int(m.get("createTime") or 0)
-        lid = int(m.get("localId") or 0)
-        return (cts, sseq, lid)
-
-    merged.sort(key=sort_key, reverse=True)
-    has_more_global = bool(has_more_any or (len(merged) > (int(offset) + int(limit))))
-    page = merged[int(offset) : int(offset) + int(limit)]
-    if want_asc:
-        page = list(reversed(page))
 
     return {
         "status": "success",
@@ -4930,19 +5935,24 @@ async def _search_chat_messages_via_fts(
             username=username,
             local_avatar_usernames=local_avatar_usernames,
         )
+        group_nicknames = _load_group_nickname_map(
+            account_dir=account_dir,
+            contact_db_path=contact_db_path,
+            chatroom_id=username,
+            sender_usernames=[str(x.get("senderUsername") or "") for x in hits],
+        )
 
         for h in hits:
             su = str(h.get("senderUsername") or "").strip()
             h["conversationName"] = conv_name
             h["conversationAvatar"] = conv_avatar
             if su:
-                row = contact_rows.get(su)
-                display_name = _pick_display_name(row, su) if row is not None else (conv_name if su == username else su)
-                if display_name == su:
-                    wd = str(wcdb_display_names.get(su) or "").strip()
-                    if wd and wd != su:
-                        display_name = wd
-                h["senderDisplayName"] = display_name
+                h["senderDisplayName"] = _resolve_sender_display_name(
+                    sender_username=su,
+                    sender_contact_rows=contact_rows,
+                    wcdb_display_names=wcdb_display_names,
+                    group_nicknames=group_nicknames,
+                )
                 avatar_url = base_url + _avatar_url_unified(
                     account_dir=account_dir,
                     username=su,
@@ -4986,6 +5996,23 @@ async def _search_chat_messages_via_fts(
             wcdb_display_names = {}
             wcdb_avatar_urls = {}
 
+        group_senders_by_room: dict[str, list[str]] = {}
+        for h in hits:
+            cu = str(h.get("username") or "").strip()
+            su = str(h.get("senderUsername") or "").strip()
+            if (not cu.endswith("@chatroom")) or (not su):
+                continue
+            group_senders_by_room.setdefault(cu, []).append(su)
+
+        group_nickname_cache: dict[str, dict[str, str]] = {}
+        for cu, senders in group_senders_by_room.items():
+            group_nickname_cache[cu] = _load_group_nickname_map(
+                account_dir=account_dir,
+                contact_db_path=contact_db_path,
+                chatroom_id=cu,
+                sender_usernames=senders,
+            )
+
         for h in hits:
             cu = str(h.get("username") or "").strip()
             su = str(h.get("senderUsername") or "").strip()
@@ -5003,13 +6030,12 @@ async def _search_chat_messages_via_fts(
             )
             h["conversationAvatar"] = conv_avatar
             if su:
-                row = contact_rows.get(su)
-                display_name = _pick_display_name(row, su) if row is not None else (conv_name if su == cu else su)
-                if display_name == su:
-                    wd = str(wcdb_display_names.get(su) or "").strip()
-                    if wd and wd != su:
-                        display_name = wd
-                h["senderDisplayName"] = display_name
+                h["senderDisplayName"] = _resolve_sender_display_name(
+                    sender_username=su,
+                    sender_contact_rows=contact_rows,
+                    wcdb_display_names=wcdb_display_names,
+                    group_nicknames=group_nickname_cache.get(cu, {}),
+                )
                 avatar_url = base_url + _avatar_url_unified(
                     account_dir=account_dir,
                     username=su,
@@ -5272,13 +6298,23 @@ async def search_chat_messages(
         contact_rows = _load_contact_rows(contact_db_path, uniq_usernames)
         conv_row = contact_rows.get(username)
         conv_name = _pick_display_name(conv_row, username)
+        group_nicknames = _load_group_nickname_map(
+            account_dir=account_dir,
+            contact_db_path=contact_db_path,
+            chatroom_id=username,
+            sender_usernames=[str(x.get("senderUsername") or "") for x in page],
+        )
 
         for h in page:
             su = str(h.get("senderUsername") or "").strip()
             h["conversationName"] = conv_name
             if su:
-                row = contact_rows.get(su)
-                h["senderDisplayName"] = _pick_display_name(row, su) if row is not None else (conv_name if su == username else su)
+                h["senderDisplayName"] = _resolve_sender_display_name(
+                    sender_username=su,
+                    sender_contact_rows=contact_rows,
+                    wcdb_display_names={},
+                    group_nicknames=group_nicknames,
+                )
 
         return {
             "status": "success",
@@ -5360,6 +6396,23 @@ async def search_chat_messages(
     )
     contact_rows = _load_contact_rows(contact_db_path, uniq_contacts)
 
+    group_senders_by_room: dict[str, list[str]] = {}
+    for h in page:
+        cu = str(h.get("username") or "").strip()
+        su = str(h.get("senderUsername") or "").strip()
+        if (not cu.endswith("@chatroom")) or (not su):
+            continue
+        group_senders_by_room.setdefault(cu, []).append(su)
+
+    group_nickname_cache: dict[str, dict[str, str]] = {}
+    for cu, senders in group_senders_by_room.items():
+        group_nickname_cache[cu] = _load_group_nickname_map(
+            account_dir=account_dir,
+            contact_db_path=contact_db_path,
+            chatroom_id=cu,
+            sender_usernames=senders,
+        )
+
     for h in page:
         cu = str(h.get("username") or "").strip()
         su = str(h.get("senderUsername") or "").strip()
@@ -5367,8 +6420,12 @@ async def search_chat_messages(
         conv_name = _pick_display_name(crow, cu) if cu else ""
         h["conversationName"] = conv_name or cu
         if su:
-            row = contact_rows.get(su)
-            h["senderDisplayName"] = _pick_display_name(row, su) if row is not None else (conv_name if su == cu else su)
+            h["senderDisplayName"] = _resolve_sender_display_name(
+                sender_username=su,
+                sender_contact_rows=contact_rows,
+                wcdb_display_names={},
+                group_nicknames=group_nickname_cache.get(cu, {}),
+            )
 
     return {
         "status": "success",
@@ -5401,6 +6458,7 @@ async def get_chat_messages_around(
         raise HTTPException(status_code=400, detail="Missing username.")
     if not anchor_id:
         raise HTTPException(status_code=400, detail="Missing anchor_id.")
+
     if before < 0:
         before = 0
     if after < 0:
@@ -5413,7 +6471,7 @@ async def get_chat_messages_around(
     parts = str(anchor_id).split(":", 2)
     if len(parts) != 3:
         raise HTTPException(status_code=400, detail="Invalid anchor_id.")
-    anchor_db_stem, anchor_table_name, anchor_local_id_str = parts
+    anchor_db_stem, anchor_table_name_in, anchor_local_id_str = parts
     try:
         anchor_local_id = int(anchor_local_id_str)
     except Exception:
@@ -5426,14 +6484,15 @@ async def get_chat_messages_around(
     message_resource_db_path = account_dir / "message_resource.db"
     base_url = str(request.base_url).rstrip("/")
 
-    target_db: Optional[Path] = None
+    anchor_db_path: Optional[Path] = None
     for p in db_paths:
         if p.stem == anchor_db_stem:
-            target_db = p
+            anchor_db_path = p
             break
-    if target_db is None:
+    if anchor_db_path is None:
         raise HTTPException(status_code=404, detail="Anchor database not found.")
 
+    # Open resource DB once (optional), and reuse for all message DBs.
     resource_conn: Optional[sqlite3.Connection] = None
     resource_chat_id: Optional[int] = None
     try:
@@ -5450,179 +6509,378 @@ async def get_chat_messages_around(
         resource_conn = None
         resource_chat_id = None
 
-    conn = sqlite3.connect(str(target_db))
-    conn.row_factory = sqlite3.Row
+    # Resolve anchor message tuple from its DB.
+    anchor_ct = 0
+    anchor_ss = 0
+    anchor_table_name = str(anchor_table_name_in or "").strip()
+    anchor_row: Optional[sqlite3.Row] = None
+    anchor_packed_select = "NULL AS packed_info_data, "
     try:
-        table_name = str(anchor_table_name).strip()
-        if not table_name:
-            raise HTTPException(status_code=404, detail="Anchor table not found.")
-
-        # Normalize table name casing if needed
+        conn_a = sqlite3.connect(str(anchor_db_path))
+        conn_a.row_factory = sqlite3.Row
         try:
-            trows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            lower_to_actual = {str(x[0]).lower(): str(x[0]) for x in trows if x and x[0]}
-            table_name = lower_to_actual.get(table_name.lower(), table_name)
-        except Exception:
-            pass
+            if not anchor_table_name:
+                try:
+                    anchor_table_name = _resolve_msg_table_name(conn_a, username) or ""
+                except Exception:
+                    anchor_table_name = ""
+            if not anchor_table_name:
+                raise HTTPException(status_code=404, detail="Anchor table not found.")
 
-        my_wxid = account_dir.name
-        my_rowid = None
-        try:
-            r2 = conn.execute(
-                "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
-                (my_wxid,),
-            ).fetchone()
-            if r2 is not None:
-                my_rowid = int(r2[0])
-        except Exception:
-            my_rowid = None
-
-        quoted_table = _quote_ident(table_name)
-        sql_anchor_with_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, n.user_name AS sender_username "
-            f"FROM {quoted_table} m "
-            "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
-            "WHERE m.local_id = ? "
-            "LIMIT 1"
-        )
-        sql_anchor_no_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, '' AS sender_username "
-            f"FROM {quoted_table} m "
-            "WHERE m.local_id = ? "
-            "LIMIT 1"
-        )
-
-        conn.text_factory = bytes
-
-        try:
-            anchor_row = conn.execute(sql_anchor_with_join, (anchor_local_id,)).fetchone()
-        except Exception:
-            anchor_row = conn.execute(sql_anchor_no_join, (anchor_local_id,)).fetchone()
-
-        if anchor_row is None:
-            raise HTTPException(status_code=404, detail="Anchor message not found.")
-
-        anchor_ct = int(anchor_row["create_time"] or 0)
-        anchor_ss = int(anchor_row["sort_seq"] or 0) if anchor_row["sort_seq"] is not None else 0
-
-        where_before = (
-            "WHERE ("
-            "m.create_time < ? "
-            "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) < ?) "
-            "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) = ? AND m.local_id <= ?)"
-            ")"
-        )
-        where_after = (
-            "WHERE ("
-            "m.create_time > ? "
-            "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) > ?) "
-            "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) = ? AND m.local_id >= ?)"
-            ")"
-        )
-
-        sql_before_with_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, n.user_name AS sender_username "
-            f"FROM {quoted_table} m "
-            "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
-            f"{where_before} "
-            "ORDER BY m.create_time DESC, COALESCE(m.sort_seq, 0) DESC, m.local_id DESC "
-            "LIMIT ?"
-        )
-        sql_before_no_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, '' AS sender_username "
-            f"FROM {quoted_table} m "
-            f"{where_before} "
-            "ORDER BY m.create_time DESC, COALESCE(m.sort_seq, 0) DESC, m.local_id DESC "
-            "LIMIT ?"
-        )
-
-        sql_after_with_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, n.user_name AS sender_username "
-            f"FROM {quoted_table} m "
-            "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
-            f"{where_after} "
-            "ORDER BY m.create_time ASC, COALESCE(m.sort_seq, 0) ASC, m.local_id ASC "
-            "LIMIT ?"
-        )
-        sql_after_no_join = (
-            "SELECT "
-            "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
-            "m.message_content, m.compress_content, '' AS sender_username "
-            f"FROM {quoted_table} m "
-            f"{where_after} "
-            "ORDER BY m.create_time ASC, COALESCE(m.sort_seq, 0) ASC, m.local_id ASC "
-            "LIMIT ?"
-        )
-
-        params_before = (anchor_ct, anchor_ct, anchor_ss, anchor_ct, anchor_ss, anchor_local_id, int(before) + 1)
-        params_after = (anchor_ct, anchor_ct, anchor_ss, anchor_ct, anchor_ss, anchor_local_id, int(after) + 1)
-
-        try:
-            before_rows = conn.execute(sql_before_with_join, params_before).fetchall()
-        except Exception:
-            before_rows = conn.execute(sql_before_no_join, params_before).fetchall()
-
-        try:
-            after_rows = conn.execute(sql_after_with_join, params_after).fetchall()
-        except Exception:
-            after_rows = conn.execute(sql_after_no_join, params_after).fetchall()
-
-        seen_ids: set[str] = set()
-        combined: list[sqlite3.Row] = []
-        for rr in list(before_rows) + list(after_rows):
-            lid = int(rr["local_id"] or 0)
-            mid = f"{target_db.stem}:{table_name}:{lid}"
-            if mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            combined.append(rr)
-
-        merged: list[dict[str, Any]] = []
-        sender_usernames: list[str] = []
-        quote_usernames: list[str] = []
-        pat_usernames: set[str] = set()
-        is_group = bool(username.endswith("@chatroom"))
-
-        _append_full_messages_from_rows(
-            merged=merged,
-            sender_usernames=sender_usernames,
-            quote_usernames=quote_usernames,
-            pat_usernames=pat_usernames,
-            rows=combined,
-            db_path=target_db,
-            table_name=table_name,
-            username=username,
-            account_dir=account_dir,
-            is_group=is_group,
-            my_rowid=my_rowid,
-            resource_conn=resource_conn,
-            resource_chat_id=resource_chat_id,
-        )
-
-        return_messages = merged
-    finally:
-        conn.close()
-        if resource_conn is not None:
+            # Normalize table name casing if needed
             try:
-                resource_conn.close()
+                trows = conn_a.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                lower_to_actual = {str(x[0]).lower(): str(x[0]) for x in trows if x and x[0]}
+                anchor_table_name = lower_to_actual.get(anchor_table_name.lower(), anchor_table_name)
             except Exception:
                 pass
 
+            quoted_table_a = _quote_ident(anchor_table_name)
+            has_packed_info_data = False
+            try:
+                cols = conn_a.execute(f"PRAGMA table_info({quoted_table_a})").fetchall()
+                has_packed_info_data = any(str(c[1] or "").strip().lower() == "packed_info_data" for c in cols)
+            except Exception:
+                has_packed_info_data = False
+            anchor_packed_select = (
+                "m.packed_info_data AS packed_info_data, " if has_packed_info_data else "NULL AS packed_info_data, "
+            )
+
+            sql_anchor_with_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + anchor_packed_select
+                + "n.user_name AS sender_username "
+                f"FROM {quoted_table_a} m "
+                "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
+                "WHERE m.local_id = ? "
+                "LIMIT 1"
+            )
+            sql_anchor_no_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + anchor_packed_select
+                + "'' AS sender_username "
+                f"FROM {quoted_table_a} m "
+                "WHERE m.local_id = ? "
+                "LIMIT 1"
+            )
+
+            conn_a.text_factory = bytes
+            try:
+                anchor_row = conn_a.execute(sql_anchor_with_join, (anchor_local_id,)).fetchone()
+            except Exception:
+                anchor_row = conn_a.execute(sql_anchor_no_join, (anchor_local_id,)).fetchone()
+
+            if anchor_row is None:
+                raise HTTPException(status_code=404, detail="Anchor message not found.")
+
+            anchor_ct = int(anchor_row["create_time"] or 0)
+            anchor_ss = int(anchor_row["sort_seq"] or 0) if anchor_row["sort_seq"] is not None else 0
+        finally:
+            conn_a.close()
+    finally:
+        pass
+
+    anchor_id_canon = f"{anchor_db_stem}:{anchor_table_name}:{anchor_local_id}"
+
+    merged: list[dict[str, Any]] = []
+    sender_usernames_all: list[str] = []
+    quote_usernames_all: list[str] = []
+    pat_usernames_all: set[str] = set()
+    is_group = bool(username.endswith("@chatroom"))
+
+    for db_path in db_paths:
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+
+            table_name = ""
+            if db_path.stem == anchor_db_stem:
+                table_name = anchor_table_name
+            else:
+                try:
+                    table_name = _resolve_msg_table_name(conn, username) or ""
+                except Exception:
+                    table_name = ""
+            if not table_name:
+                continue
+
+            my_wxid = account_dir.name
+            my_rowid = None
+            try:
+                r2 = conn.execute(
+                    "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
+                    (my_wxid,),
+                ).fetchone()
+                if r2 is not None:
+                    my_rowid = int(r2[0])
+            except Exception:
+                my_rowid = None
+
+            quoted_table = _quote_ident(table_name)
+            has_packed_info_data = False
+            try:
+                cols = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
+                has_packed_info_data = any(str(c[1] or "").strip().lower() == "packed_info_data" for c in cols)
+            except Exception:
+                has_packed_info_data = False
+            packed_select = (
+                "m.packed_info_data AS packed_info_data, " if has_packed_info_data else "NULL AS packed_info_data, "
+            )
+
+            # Stable cross-db ordering: (create_time, sort_seq, db_stem, local_id)
+            stem = db_path.stem
+            if stem < anchor_db_stem:
+                tie_before = "1"
+                tie_before_params: tuple[Any, ...] = ()
+                tie_after = "0"
+                tie_after_params: tuple[Any, ...] = ()
+            elif stem > anchor_db_stem:
+                tie_before = "0"
+                tie_before_params = ()
+                tie_after = "1"
+                tie_after_params = ()
+            else:
+                tie_before = "m.local_id < ?"
+                tie_before_params = (int(anchor_local_id),)
+                tie_after = "m.local_id > ?"
+                tie_after_params = (int(anchor_local_id),)
+
+            where_before = (
+                "WHERE ("
+                "m.create_time < ? "
+                "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) < ?) "
+                f"OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) = ? AND {tie_before})"
+                ")"
+            )
+            where_after = (
+                "WHERE ("
+                "m.create_time > ? "
+                "OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) > ?) "
+                f"OR (m.create_time = ? AND COALESCE(m.sort_seq, 0) = ? AND {tie_after})"
+                ")"
+            )
+
+            sql_before_with_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + packed_select
+                + "n.user_name AS sender_username "
+                f"FROM {quoted_table} m "
+                "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
+                f"{where_before} "
+                "ORDER BY m.create_time DESC, COALESCE(m.sort_seq, 0) DESC, m.local_id DESC "
+                "LIMIT ?"
+            )
+            sql_before_no_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + packed_select
+                + "'' AS sender_username "
+                f"FROM {quoted_table} m "
+                f"{where_before} "
+                "ORDER BY m.create_time DESC, COALESCE(m.sort_seq, 0) DESC, m.local_id DESC "
+                "LIMIT ?"
+            )
+
+            sql_after_with_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + packed_select
+                + "n.user_name AS sender_username "
+                f"FROM {quoted_table} m "
+                "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
+                f"{where_after} "
+                "ORDER BY m.create_time ASC, COALESCE(m.sort_seq, 0) ASC, m.local_id ASC "
+                "LIMIT ?"
+            )
+            sql_after_no_join = (
+                "SELECT "
+                "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+                "m.message_content, m.compress_content, "
+                + packed_select
+                + "'' AS sender_username "
+                f"FROM {quoted_table} m "
+                f"{where_after} "
+                "ORDER BY m.create_time ASC, COALESCE(m.sort_seq, 0) ASC, m.local_id ASC "
+                "LIMIT ?"
+            )
+
+            # Always fetch anchor row from anchor DB, but don't include anchor itself in before/after queries.
+            anchor_rows: list[sqlite3.Row] = []
+            if db_path.stem == anchor_db_stem:
+                if anchor_row is None:
+                    raise HTTPException(status_code=404, detail="Anchor message not found.")
+                anchor_rows = [anchor_row]
+
+            conn.text_factory = bytes
+
+            before_rows: list[sqlite3.Row] = []
+            if int(before) > 0:
+                params_before = (
+                    int(anchor_ct),
+                    int(anchor_ct),
+                    int(anchor_ss),
+                    int(anchor_ct),
+                    int(anchor_ss),
+                    *tie_before_params,
+                    int(before) + 1,
+                )
+                try:
+                    before_rows = conn.execute(sql_before_with_join, params_before).fetchall()
+                except Exception:
+                    before_rows = conn.execute(sql_before_no_join, params_before).fetchall()
+
+            after_rows: list[sqlite3.Row] = []
+            if int(after) > 0:
+                params_after = (
+                    int(anchor_ct),
+                    int(anchor_ct),
+                    int(anchor_ss),
+                    int(anchor_ct),
+                    int(anchor_ss),
+                    *tie_after_params,
+                    int(after) + 1,
+                )
+                try:
+                    after_rows = conn.execute(sql_after_with_join, params_after).fetchall()
+                except Exception:
+                    after_rows = conn.execute(sql_after_no_join, params_after).fetchall()
+
+            # Dedup rows by message id within this DB.
+            seen_ids: set[str] = set()
+            combined: list[sqlite3.Row] = []
+            for rr in list(before_rows) + list(anchor_rows) + list(after_rows):
+                lid = int(rr["local_id"] or 0)
+                mid = f"{db_path.stem}:{table_name}:{lid}"
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                combined.append(rr)
+
+            if not combined:
+                continue
+
+            _append_full_messages_from_rows(
+                merged=merged,
+                sender_usernames=sender_usernames_all,
+                quote_usernames=quote_usernames_all,
+                pat_usernames=pat_usernames_all,
+                rows=combined,
+                db_path=db_path,
+                table_name=table_name,
+                username=username,
+                account_dir=account_dir,
+                is_group=is_group,
+                my_rowid=my_rowid,
+                resource_conn=resource_conn,
+                resource_chat_id=resource_chat_id,
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            # Skip broken DBs / missing tables gracefully.
+            continue
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if resource_conn is not None:
+        try:
+            resource_conn.close()
+        except Exception:
+            pass
+
+    # Global dedupe + sort.
+    if merged:
+        seen_ids2: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for m in merged:
+            mid = str(m.get("id") or "").strip()
+            if mid and mid in seen_ids2:
+                continue
+            if mid:
+                seen_ids2.add(mid)
+            deduped.append(m)
+        merged = deduped
+
+    def sort_key_global(m: dict[str, Any]) -> tuple[int, int, str, int]:
+        cts = int(m.get("createTime") or 0)
+        sseq = int(m.get("sortSeq") or 0)
+        lid = int(m.get("localId") or 0)
+        mid = str(m.get("id") or "")
+        stem2 = ""
+        try:
+            stem2 = mid.split(":", 1)[0] if ":" in mid else ""
+        except Exception:
+            stem2 = ""
+        return (cts, sseq, stem2, lid)
+
+    merged.sort(key=sort_key_global, reverse=False)
+
+    anchor_index_all = -1
+    for i, m in enumerate(merged):
+        if str(m.get("id") or "") == str(anchor_id_canon):
+            anchor_index_all = i
+            break
+    if anchor_index_all < 0:
+        # Fallback: ignore table casing differences when matching anchor.
+        for i, m in enumerate(merged):
+            mid = str(m.get("id") or "")
+            p2 = mid.split(":", 2)
+            if len(p2) != 3:
+                continue
+            if p2[0] != anchor_db_stem:
+                continue
+            try:
+                if int(p2[2] or 0) == int(anchor_local_id):
+                    anchor_index_all = i
+                    break
+            except Exception:
+                continue
+
+    if anchor_index_all < 0:
+        # Should not happen because we always include the anchor row, but keep defensive.
+        anchor_index_all = 0
+
+    start = max(0, int(anchor_index_all) - int(before))
+    end = min(len(merged), int(anchor_index_all) + int(after) + 1)
+    return_messages = merged[start:end]
+    anchor_index = int(anchor_index_all) - start if 0 <= anchor_index_all < len(merged) else -1
+
+    # Postprocess only the returned window to keep it fast.
+    sender_usernames_win = [str(m.get("senderUsername") or "").strip() for m in return_messages if str(m.get("senderUsername") or "").strip()]
+    quote_usernames_win = [str(m.get("quoteUsername") or "").strip() for m in return_messages if str(m.get("quoteUsername") or "").strip()]
+    pat_usernames_win: set[str] = set()
+    try:
+        for m in return_messages:
+            if int(m.get("type") or 0) != 266287972401:
+                continue
+            raw = str(m.get("_rawText") or "")
+            if not raw:
+                continue
+            template = _extract_xml_tag_text(raw, "template")
+            if not template:
+                continue
+            pat_usernames_win.update({mm.group(1) for mm in re.finditer(r"\$\{([^}]+)\}", template) if mm.group(1)})
+    except Exception:
+        pat_usernames_win = set()
+
     _postprocess_full_messages(
         merged=return_messages,
-        sender_usernames=sender_usernames,
-        quote_usernames=quote_usernames,
-        pat_usernames=pat_usernames,
+        sender_usernames=sender_usernames_win,
+        quote_usernames=quote_usernames_win,
+        pat_usernames=pat_usernames_win,
         account_dir=account_dir,
         username=username,
         base_url=base_url,
@@ -5630,24 +6888,1858 @@ async def get_chat_messages_around(
         head_image_db_path=head_image_db_path,
     )
 
-    def sort_key(m: dict[str, Any]) -> tuple[int, int, int]:
-        sseq = int(m.get("sortSeq") or 0)
-        cts = int(m.get("createTime") or 0)
-        lid = int(m.get("localId") or 0)
-        return (cts, sseq, lid)
-
-    return_messages.sort(key=sort_key, reverse=False)
-    anchor_index = -1
-    for i, m in enumerate(return_messages):
-        if str(m.get("id") or "") == str(anchor_id):
-            anchor_index = i
-            break
-
     return {
         "status": "success",
         "account": account_dir.name,
         "username": username,
-        "anchorId": anchor_id,
+        "anchorId": anchor_id_canon,
         "anchorIndex": anchor_index,
         "messages": return_messages,
     }
+
+
+@router.get("/api/chat/chat_history/resolve", summary="解析嵌套合并转发聊天记录（通过 server_id）")
+async def resolve_nested_chat_history(
+    request: Request,
+    server_id: int,
+    account: Optional[str] = None,
+):
+    """Resolve a nested merged-forward chat history item (datatype=17) to its full recordItem XML.
+
+    Some nested records inside a merged-forward recordItem only carry pointers like `fromnewmsgid` (server_id),
+    while the full recordItem exists in the original app message (local_type=49, appmsg type=19) stored elsewhere.
+    WeChat can open it by looking up the original message; we do the same here.
+    """
+    if not server_id:
+        raise HTTPException(status_code=400, detail="Missing server_id.")
+
+    account_dir = _resolve_account_dir(account)
+    db_paths = _iter_message_db_paths(account_dir)
+    base_url = str(request.base_url).rstrip("/")
+    found_appmsg = False
+
+    for db_path in db_paths:
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            conn.text_factory = bytes
+
+            try:
+                table_rows = conn.execute(
+                    # Some DBs use `Msg_...` (capital M). Use LOWER() to keep matching even if
+                    # `PRAGMA case_sensitive_like=ON` is set.
+                    "SELECT name FROM sqlite_master WHERE type='table' AND lower(name) LIKE 'msg_%'"
+                ).fetchall()
+            except Exception:
+                table_rows = []
+
+            # With `conn.text_factory = bytes`, sqlite_master.name comes back as bytes.
+            # Decode it to the real table name, otherwise we'd end up querying a non-existent
+            # table like "b'Msg_...'" and never find the message.
+            table_names = [_decode_sqlite_text(r[0]).strip() for r in table_rows if r and r[0]]
+            for table_name in table_names:
+                quoted = _quote_ident(table_name)
+                try:
+                    row = conn.execute(
+                        f"""
+                        SELECT local_id, server_id, local_type, create_time, message_content, compress_content
+                        FROM {quoted}
+                        -- WeChat v4 can pack appmsg subtype into the high 32 bits of local_type:
+                        --   local_type = base_type + (app_subtype << 32)
+                        -- so a chatHistory appmsg can be 49 + (19<<32), not exactly 49.
+                        WHERE server_id = ? AND (local_type & 4294967295) = 49
+                        LIMIT 1
+                        """,
+                        (int(server_id),),
+                    ).fetchone()
+                except Exception:
+                    row = None
+
+                if row is None:
+                    continue
+
+                found_appmsg = True
+                raw_text = _decode_message_content(row["compress_content"], row["message_content"]).strip()
+                if not raw_text:
+                    continue
+
+                # If the stored payload is a zstd frame but we couldn't decode it into XML, it's
+                # almost always because the optional `zstandard` dependency isn't installed.
+                try:
+                    blob = row["message_content"]
+                    if isinstance(blob, memoryview):
+                        blob = blob.tobytes()
+                    if isinstance(blob, (bytes, bytearray)) and bytes(blob).startswith(b"\x28\xb5\x2f\xfd"):
+                        lower = raw_text.lower()
+                        if "<appmsg" not in lower and "<msg" not in lower:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="Failed to decode zstd-compressed message_content. Please install `zstandard` and restart the backend.",
+                            )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+
+                parsed = _parse_app_message(raw_text)
+                if not isinstance(parsed, dict):
+                    continue
+
+                if str(parsed.get("renderType") or "") != "chatHistory":
+                    # Found an app message, but not a merged-forward chat history.
+                    continue
+
+                record_item = str(parsed.get("recordItem") or "").strip()
+                if not record_item:
+                    continue
+
+                return {
+                    "status": "success",
+                    "serverId": int(server_id),
+                    "title": str(parsed.get("title") or "").strip(),
+                    "content": str(parsed.get("content") or "").strip(),
+                    "recordItem": record_item,
+                    "baseUrl": base_url,
+                }
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if found_appmsg:
+        raise HTTPException(status_code=404, detail="Target message is not a chat history.")
+    raise HTTPException(status_code=404, detail="Message not found for server_id.")
+
+
+@router.get("/api/chat/appmsg/resolve", summary="解析卡片/小程序等 App 消息（通过 server_id）")
+async def resolve_app_message(
+    request: Request,
+    server_id: int,
+    account: Optional[str] = None,
+):
+    """Resolve an app message (base local_type=49) by server_id.
+
+    This is mainly used by merged-forward recordItem dataitems that only contain pointers like
+    `fromnewmsgid` (server_id). WeChat can open the original card by looking up the appmsg in
+    message DBs; we do the same and return the parsed appmsg fields.
+    """
+    if not server_id:
+        raise HTTPException(status_code=400, detail="Missing server_id.")
+
+    account_dir = _resolve_account_dir(account)
+    db_paths = _iter_message_db_paths(account_dir)
+    base_url = str(request.base_url).rstrip("/")
+
+    found_appmsg = False
+    for db_path in db_paths:
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            conn.text_factory = bytes
+
+            try:
+                table_rows = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND lower(name) LIKE 'msg_%'"
+                ).fetchall()
+            except Exception:
+                table_rows = []
+
+            table_names = [_decode_sqlite_text(r[0]).strip() for r in table_rows if r and r[0]]
+            for table_name in table_names:
+                quoted = _quote_ident(table_name)
+                try:
+                    row = conn.execute(
+                        f"""
+                        SELECT local_id, server_id, local_type, create_time, message_content, compress_content
+                        FROM {quoted}
+                        WHERE server_id = ? AND (local_type & 4294967295) = 49
+                        LIMIT 1
+                        """,
+                        (int(server_id),),
+                    ).fetchone()
+                except Exception:
+                    row = None
+
+                if row is None:
+                    continue
+
+                found_appmsg = True
+                raw_text = _decode_message_content(row["compress_content"], row["message_content"]).strip()
+                if not raw_text:
+                    continue
+
+                # Same zstd guard as chat_history/resolve.
+                try:
+                    blob = row["message_content"]
+                    if isinstance(blob, memoryview):
+                        blob = blob.tobytes()
+                    if isinstance(blob, (bytes, bytearray)) and bytes(blob).startswith(b"\x28\xb5\x2f\xfd"):
+                        lower = raw_text.lower()
+                        if "<appmsg" not in lower and "<msg" not in lower:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="Failed to decode zstd-compressed message_content. Please install `zstandard` and restart the backend.",
+                            )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+
+                parsed = _parse_app_message(raw_text)
+                if not isinstance(parsed, dict):
+                    continue
+
+                # Return a stable, explicit shape for the frontend.
+                return {
+                    "status": "success",
+                    "serverId": int(server_id),
+                    "renderType": str(parsed.get("renderType") or "text"),
+                    "title": str(parsed.get("title") or "").strip(),
+                    "content": str(parsed.get("content") or "").strip(),
+                    "url": str(parsed.get("url") or "").strip(),
+                    "thumbUrl": str(parsed.get("thumbUrl") or "").strip(),
+                    "coverUrl": str(parsed.get("coverUrl") or "").strip(),
+                    "from": str(parsed.get("from") or "").strip(),
+                    "fromUsername": str(parsed.get("fromUsername") or "").strip(),
+                    "linkType": str(parsed.get("linkType") or "").strip(),
+                    "linkStyle": str(parsed.get("linkStyle") or "").strip(),
+                    "size": str(parsed.get("size") or "").strip(),
+                    "baseUrl": base_url,
+                }
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if found_appmsg:
+        raise HTTPException(status_code=404, detail="App message decode failed.")
+    raise HTTPException(status_code=404, detail="Message not found for server_id.")
+
+
+def _normalize_table_name_case(conn: sqlite3.Connection, table_name: str) -> str:
+    t = str(table_name or "").strip()
+    if not t:
+        return ""
+    try:
+        r = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1",
+            (t,),
+        ).fetchone()
+        if r is not None and r[0]:
+            # With `conn.text_factory = bytes`, sqlite_master.name can be returned as bytes.
+            # Decode it to avoid querying a non-existent table like "b'Msg_...'".
+            return _decode_sqlite_text(r[0]).strip()
+    except Exception:
+        pass
+    return t
+
+
+def _table_info_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    t = str(table_name or "").strip()
+    if not t:
+        return set()
+    quoted = _quote_ident(t)
+    try:
+        cols = conn.execute(f"PRAGMA table_info({quoted})").fetchall()
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for c in cols:
+        try:
+            name = _decode_sqlite_text(c[1]).strip()
+        except Exception:
+            continue
+        if name:
+            out.add(name)
+    return out
+
+
+def _has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    want = str(column_name or "").strip().lower()
+    if not want:
+        return False
+    for c in _table_info_columns(conn, table_name):
+        if str(c or "").strip().lower() == want:
+            return True
+    return False
+
+
+def _lookup_output_my_rowid(conn: sqlite3.Connection, my_wxid: str) -> Optional[int]:
+    try:
+        r = conn.execute(
+            "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
+            (str(my_wxid or "").strip(),),
+        ).fetchone()
+        if r is None:
+            return None
+        return int(r[0])
+    except Exception:
+        return None
+
+
+def _lookup_output_username_by_rowid(conn: sqlite3.Connection, rowid: int) -> str:
+    try:
+        r = conn.execute(
+            "SELECT user_name FROM Name2Id WHERE rowid = ? LIMIT 1",
+            (int(rowid or 0),),
+        ).fetchone()
+        if r is None:
+            return ""
+        return _decode_sqlite_text(r[0]).strip()
+    except Exception:
+        return ""
+
+
+def _select_output_message_row(conn: sqlite3.Connection, *, table_name: str, local_id: int) -> Optional[sqlite3.Row]:
+    t = _normalize_table_name_case(conn, table_name)
+    if not t:
+        return None
+    quoted_table = _quote_ident(t)
+    has_packed_info_data = _has_column(conn, t, "packed_info_data")
+    packed_select = "m.packed_info_data AS packed_info_data, " if has_packed_info_data else "NULL AS packed_info_data, "
+    sql_with_join = (
+        "SELECT "
+        "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+        "m.message_content, m.compress_content, "
+        + packed_select
+        + "n.user_name AS sender_username "
+        f"FROM {quoted_table} m "
+        "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
+        "WHERE m.local_id = ? "
+        "LIMIT 1"
+    )
+    sql_no_join = (
+        "SELECT "
+        "m.local_id, m.server_id, m.local_type, m.sort_seq, m.real_sender_id, m.create_time, "
+        "m.message_content, m.compress_content, "
+        + packed_select
+        + "'' AS sender_username "
+        f"FROM {quoted_table} m "
+        "WHERE m.local_id = ? "
+        "LIMIT 1"
+    )
+    try:
+        return conn.execute(sql_with_join, (int(local_id),)).fetchone()
+    except Exception:
+        try:
+            return conn.execute(sql_no_join, (int(local_id),)).fetchone()
+        except Exception:
+            return None
+
+
+def _resolve_db_storage_message_paths(account_dir: Path, db_stem: str) -> tuple[Path, Path]:
+    db_storage_dir = _resolve_account_db_storage_dir(account_dir)
+    if db_storage_dir is None:
+        raise HTTPException(status_code=400, detail="Cannot resolve db_storage directory for this account.")
+    db_name = str(db_stem or "").strip()
+    if not db_name:
+        raise HTTPException(status_code=400, detail="Invalid message_id.")
+    msg_db_path = db_storage_dir / "message" / f"{db_name}.db"
+    res_db_path = db_storage_dir / "message" / "message_resource.db"
+    return msg_db_path, res_db_path
+
+
+def _build_wcdb_update_sql(*, table_name: str, updates: dict[str, Any], where_local_id: int) -> str:
+    t = str(table_name or "").strip()
+    if not t:
+        raise HTTPException(status_code=400, detail="Missing table_name.")
+    if not updates:
+        raise HTTPException(status_code=400, detail="Missing edits.")
+    parts: list[str] = []
+    for k, v in updates.items():
+        col = str(k or "").strip()
+        if not col:
+            continue
+        parts.append(f"{_quote_ident(col)} = {_sql_literal(v)}")
+    if not parts:
+        raise HTTPException(status_code=400, detail="Missing edits.")
+    return f"UPDATE {_quote_ident(t)} SET " + ", ".join(parts) + f" WHERE local_id = {int(where_local_id)}"
+
+
+def _build_sqlite_update_sql(*, table_name: str, updates: dict[str, Any], where_local_id: int) -> tuple[str, list[Any]]:
+    t = str(table_name or "").strip()
+    if not t:
+        raise HTTPException(status_code=400, detail="Missing table_name.")
+    if not updates:
+        raise HTTPException(status_code=400, detail="Missing edits.")
+    cols: list[str] = []
+    params: list[Any] = []
+    for k, v in updates.items():
+        col = str(k or "").strip()
+        if not col:
+            continue
+        cols.append(f"{_quote_ident(col)} = ?")
+        params.append(v)
+    if not cols:
+        raise HTTPException(status_code=400, detail="Missing edits.")
+    sql = f"UPDATE {_quote_ident(t)} SET " + ", ".join(cols) + " WHERE local_id = ?"
+    params.append(int(where_local_id))
+    return sql, params
+
+
+@router.get("/api/chat/messages/raw", summary="获取单条消息原始字段（output 解密库）")
+def get_chat_message_raw(
+    *,
+    account: Optional[str] = None,
+    username: str,
+    message_id: str,
+) -> dict[str, Any]:
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username.")
+    if not message_id:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+
+    account_dir = _resolve_account_dir(account)
+    try:
+        db_stem, table_name_in, local_id = chat_edit_store.parse_message_id(message_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message_id.")
+
+    db_path = account_dir / f"{db_stem}.db"
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="Message database not found.")
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.text_factory = bytes
+        table_name = _normalize_table_name_case(conn, table_name_in)
+        if not table_name:
+            raise HTTPException(status_code=404, detail="Message table not found.")
+
+        quoted_table = _quote_ident(table_name)
+        row = conn.execute(f"SELECT * FROM {quoted_table} WHERE local_id = ? LIMIT 1", (int(local_id),)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Message not found.")
+
+        out_row: dict[str, Any] = {}
+        for k in row.keys():
+            out_row[str(k)] = _jsonify_db_value(str(k), row[k])
+
+        return {
+            "status": "success",
+            "account": account_dir.name,
+            "username": username,
+            "messageId": f"{db_stem}:{table_name}:{int(local_id)}",
+            "row": out_row,
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@router.post("/api/chat/messages/edit", summary="编辑/修改消息（写入真实库 db_storage 并同步 output）")
+async def edit_chat_message(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+
+    account = str(payload.get("account") or "").strip() or None
+    session_id = str(payload.get("session_id") or payload.get("username") or payload.get("sessionId") or "").strip()
+    message_id_in = str(payload.get("message_id") or payload.get("messageId") or "").strip()
+    edits_in = payload.get("edits")
+    unsafe = bool(payload.get("unsafe") or False)
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
+    if not message_id_in:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+    if not isinstance(edits_in, dict) or not edits_in:
+        raise HTTPException(status_code=400, detail="Missing edits.")
+
+    account_dir = _resolve_account_dir(account)
+    base_url = str(request.base_url).rstrip("/")
+
+    try:
+        db_stem, table_name_in, local_id_old = chat_edit_store.parse_message_id(message_id_in)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message_id.")
+
+    msg_db_path_out = account_dir / f"{db_stem}.db"
+    if not msg_db_path_out.exists():
+        raise HTTPException(status_code=404, detail="Message database not found.")
+
+    msg_db_path_real, res_db_path_real = _resolve_db_storage_message_paths(account_dir, db_stem)
+    if not msg_db_path_real.exists():
+        raise HTTPException(status_code=404, detail="Real message database not found in db_storage.")
+
+    # Validate edits against output schema and normalize table name casing.
+    table_name = table_name_in
+    edits: dict[str, Any] = {}
+    explicit_keys: set[str] = set()
+    conn_schema: Optional[sqlite3.Connection] = None
+    try:
+        conn_schema = sqlite3.connect(str(msg_db_path_out))
+        conn_schema.row_factory = sqlite3.Row
+        table_name = _normalize_table_name_case(conn_schema, table_name_in)
+        if not table_name:
+            raise HTTPException(status_code=404, detail="Message table not found.")
+        cols = _table_info_columns(conn_schema, table_name)
+        if not cols:
+            raise HTTPException(status_code=404, detail="Message table not found.")
+
+        for k, v in edits_in.items():
+            col = str(k or "").strip()
+            if not col:
+                continue
+            if col not in cols:
+                raise HTTPException(status_code=400, detail=f"Unknown column: {col}")
+            if not _is_safe_edit_column(col, unsafe=unsafe):
+                raise HTTPException(status_code=400, detail=f"Unsafe column requires unsafe=true: {col}")
+            explicit_keys.add(col)
+            edits[col] = _normalize_edit_value(col, v)
+        if not edits:
+            raise HTTPException(status_code=400, detail="Missing edits.")
+    finally:
+        if conn_schema is not None:
+            try:
+                conn_schema.close()
+            except Exception:
+                pass
+
+    message_id = f"{db_stem}:{table_name}:{int(local_id_old)}"
+
+    # Decide update strategy for real db_storage.
+    only_message_content = (set(edits.keys()) == {"message_content"}) and ("compress_content" not in explicit_keys)
+
+    # Default behavior: clear compress_content when message_content changes, unless explicitly provided.
+    output_edits = dict(edits)
+    if "message_content" in edits and ("compress_content" not in explicit_keys):
+        output_edits.setdefault("compress_content", None)
+
+    new_local_id = int(edits.get("local_id") or 0) if "local_id" in edits else int(local_id_old)
+    if new_local_id <= 0:
+        new_local_id = int(local_id_old)
+
+    # Resource sync mapping when Msg fields change.
+    resource_sync_map: dict[str, str] = {
+        "local_type": "message_local_type",
+        "create_time": "message_create_time",
+        "server_id": "message_svr_id",
+        "origin_source": "message_origin_source",
+    }
+    if unsafe:
+        resource_sync_map["local_id"] = "message_local_id"
+
+    warnings: list[str] = []
+
+    with _realtime_sync_lock(account_dir.name, session_id):
+        # Ensure WCDB realtime connection.
+        try:
+            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+        except WCDBRealtimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Read original row from real db_storage (snapshot).
+        original_row: Optional[dict[str, Any]] = None
+        original_create_time = 0
+        try:
+            select_sql = f"SELECT * FROM {_quote_ident(table_name)} WHERE local_id = {int(local_id_old)} LIMIT 1"
+            with wcdb_conn.lock:
+                rows = _wcdb_exec_query(
+                    wcdb_conn.handle,
+                    kind="message",
+                    path=str(msg_db_path_real),
+                    sql=select_sql,
+                )
+            if rows and isinstance(rows[0], dict):
+                original_row = rows[0]
+                try:
+                    original_create_time = int(original_row.get("create_time") or 0)
+                except Exception:
+                    original_create_time = 0
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read original message row: {e}")
+        if not original_row:
+            raise HTTPException(status_code=404, detail="Message not found in real db_storage.")
+
+        # Read original resource row from real db_storage (optional).
+        original_resource_row: Optional[dict[str, Any]] = None
+        try:
+            if res_db_path_real.exists() and original_create_time > 0:
+                res_sql = (
+                    "SELECT * FROM MessageResourceInfo "
+                    f"WHERE message_local_id = {int(local_id_old)} AND message_create_time = {int(original_create_time)} "
+                    "ORDER BY message_id DESC "
+                    "LIMIT 1"
+                )
+                with wcdb_conn.lock:
+                    res_rows = _wcdb_exec_query(
+                        wcdb_conn.handle,
+                        kind="message",
+                        path=str(res_db_path_real),
+                        sql=res_sql,
+                    )
+                if res_rows and isinstance(res_rows[0], dict):
+                    original_resource_row = res_rows[0]
+        except Exception:
+            original_resource_row = None
+
+        # Create snapshot record only if this message hasn't been edited via this tool.
+        created_record = False
+        existing_record = chat_edit_store.get_message_edit(account_dir.name, session_id, message_id)
+        if existing_record is None:
+            try:
+                chat_edit_store.upsert_original_once(
+                    account=account_dir.name,
+                    session_id=session_id,
+                    db=db_stem,
+                    table_name=table_name,
+                    local_id=int(local_id_old),
+                    original_msg=original_row,
+                    original_resource=original_resource_row,
+                    now_ms=int(time.time() * 1000),
+                )
+                created_record = True
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to write edit snapshot: {e}")
+
+        # Read current output row (for rollback if real update fails).
+        out_before: dict[str, Any] = {}
+        conn_out: Optional[sqlite3.Connection] = None
+        try:
+            conn_out = sqlite3.connect(str(msg_db_path_out), timeout=5)
+            conn_out.row_factory = sqlite3.Row
+            table_name_out = _normalize_table_name_case(conn_out, table_name)
+            if not table_name_out:
+                raise HTTPException(status_code=404, detail="Message table not found.")
+            quoted = _quote_ident(table_name_out)
+            row_before = conn_out.execute(
+                f"SELECT * FROM {quoted} WHERE local_id = ? LIMIT 1",
+                (int(local_id_old),),
+            ).fetchone()
+            if row_before is None:
+                if created_record:
+                    try:
+                        chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                    except Exception:
+                        pass
+                raise HTTPException(status_code=404, detail="Message not found in output database.")
+            for k in row_before.keys():
+                out_before[str(k)] = row_before[k]
+
+            # Apply edits to output decrypted db first; if this fails, do not touch the real db_storage.
+            sql_out, params_out = _build_sqlite_update_sql(
+                table_name=table_name_out,
+                updates=output_edits,
+                where_local_id=int(local_id_old),
+            )
+            cur_out = conn_out.execute(sql_out, params_out)
+            conn_out.commit()
+            if int(getattr(cur_out, "rowcount", 0) or 0) <= 0:
+                if created_record:
+                    try:
+                        chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                    except Exception:
+                        pass
+                raise HTTPException(status_code=404, detail="Message not found in output database.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            if created_record:
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Failed to update output database: {e}")
+
+        # Apply edits to real db_storage. If it fails, rollback output changes.
+        try:
+            if only_message_content:
+                new_content = edits.get("message_content")
+                if isinstance(new_content, (bytes, bytearray, memoryview)):
+                    try:
+                        new_content = bytes(new_content).decode("utf-8", errors="replace")
+                    except Exception:
+                        new_content = ""
+                _wcdb_update_message(
+                    wcdb_conn.handle,
+                    session_id=session_id,
+                    local_id=int(local_id_old),
+                    create_time=int(original_create_time),
+                    new_content=str(new_content or ""),
+                )
+            else:
+                real_edits = dict(edits)
+                if "message_content" in edits and ("compress_content" not in explicit_keys):
+                    real_edits.setdefault("compress_content", None)
+                sql_real = _build_wcdb_update_sql(
+                    table_name=table_name,
+                    updates=real_edits,
+                    where_local_id=int(local_id_old),
+                )
+                with wcdb_conn.lock:
+                    _wcdb_exec_query(
+                        wcdb_conn.handle,
+                        kind="message",
+                        path=str(msg_db_path_real),
+                        sql=sql_real,
+                    )
+        except Exception as e:
+            # Roll back output changes.
+            try:
+                where_lid = int(new_local_id) if ("local_id" in edits) else int(local_id_old)
+                cols_now = _table_info_columns(conn_out, table_name_out)
+                rollback_updates = {k: v for k, v in out_before.items() if str(k or "") in cols_now}
+                sql_rb, params_rb = _build_sqlite_update_sql(
+                    table_name=table_name_out,
+                    updates=rollback_updates,
+                    where_local_id=where_lid,
+                )
+                conn_out.execute(sql_rb, params_rb)
+                conn_out.commit()
+            except Exception:
+                pass
+            # Remove newly-created snapshot record (real db was not touched successfully).
+            if created_record:
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Failed to update real db_storage: {e}")
+        finally:
+            if conn_out is not None:
+                try:
+                    conn_out.close()
+                except Exception:
+                    pass
+
+        # Sync message_resource key fields (best-effort).
+        try:
+            msg_to_res_updates: dict[str, Any] = {}
+            for msg_col, res_col in resource_sync_map.items():
+                if msg_col in edits:
+                    msg_to_res_updates[res_col] = _normalize_edit_value(res_col, edits[msg_col])
+            if msg_to_res_updates:
+                res_message_id = 0
+                if original_resource_row is not None:
+                    try:
+                        res_message_id = int(original_resource_row.get("message_id") or 0)
+                    except Exception:
+                        res_message_id = 0
+                if res_message_id > 0:
+                    # real db_storage
+                    if res_db_path_real.exists():
+                        parts = [f"{_quote_ident(k)} = {_sql_literal(v)}" for k, v in msg_to_res_updates.items()]
+                        sql_res_real = (
+                            "UPDATE MessageResourceInfo SET "
+                            + ", ".join(parts)
+                            + f" WHERE message_id = {int(res_message_id)}"
+                        )
+                        with wcdb_conn.lock:
+                            _wcdb_exec_query(
+                                wcdb_conn.handle,
+                                kind="message",
+                                path=str(res_db_path_real),
+                                sql=sql_res_real,
+                            )
+
+                    # output decrypted
+                    out_res_db_path = account_dir / "message_resource.db"
+                    if out_res_db_path.exists():
+                        conn_res = sqlite3.connect(str(out_res_db_path), timeout=5)
+                        try:
+                            set_cols = ", ".join([f"{_quote_ident(k)} = ?" for k in msg_to_res_updates.keys()])
+                            params = list(msg_to_res_updates.values()) + [int(res_message_id)]
+                            conn_res.execute(
+                                f"UPDATE MessageResourceInfo SET {set_cols} WHERE message_id = ?",
+                                params,
+                            )
+                            conn_res.commit()
+                        finally:
+                            conn_res.close()
+                else:
+                    warnings.append("message_resource row not found; skipped resource sync.")
+        except Exception as e:
+            warnings.append(f"Failed to sync message_resource: {e}")
+
+        # If local_id changed (unsafe), move the edit record key so future reset works.
+        edit_record_local_id = int(local_id_old)
+        if "local_id" in edits and int(new_local_id) != int(local_id_old):
+            ok = chat_edit_store.update_message_edit_local_id(
+                account=account_dir.name,
+                session_id=session_id,
+                db=db_stem,
+                table_name=table_name,
+                old_local_id=int(local_id_old),
+                new_local_id=int(new_local_id),
+            )
+            if not ok:
+                warnings.append("Failed to update edit record key after local_id change.")
+            else:
+                edit_record_local_id = int(new_local_id)
+
+        # If this was an already-tracked message, bump edit metadata.
+        if existing_record is not None:
+            try:
+                chat_edit_store.upsert_original_once(
+                    account=account_dir.name,
+                    session_id=session_id,
+                    db=db_stem,
+                    table_name=table_name,
+                    local_id=int(edit_record_local_id),
+                    original_msg={},
+                    original_resource=None,
+                    now_ms=int(time.time() * 1000),
+                )
+            except Exception:
+                pass
+
+        # Track which columns were actually modified so reset can restore only those fields.
+        try:
+            chat_edit_store.merge_edited_columns(
+                account=account_dir.name,
+                session_id=session_id,
+                db=db_stem,
+                table_name=table_name,
+                local_id=int(edit_record_local_id),
+                columns=list(output_edits.keys()),
+            )
+        except Exception:
+            pass
+
+    # Build updated message object (best-effort, from output).
+    updated_message: Optional[dict[str, Any]] = None
+    try:
+        conn_msg = sqlite3.connect(str(msg_db_path_out))
+        conn_msg.row_factory = sqlite3.Row
+        conn_msg.text_factory = bytes
+        row = _select_output_message_row(conn_msg, table_name=table_name, local_id=int(new_local_id))
+        if row is not None:
+            my_rowid = _lookup_output_my_rowid(conn_msg, account_dir.name)
+            out_res_db_path2 = account_dir / "message_resource.db"
+            resource_conn: Optional[sqlite3.Connection] = None
+            resource_chat_id: Optional[int] = None
+            try:
+                if out_res_db_path2.exists():
+                    resource_conn = sqlite3.connect(str(out_res_db_path2))
+                    resource_conn.row_factory = sqlite3.Row
+                    resource_chat_id = _resource_lookup_chat_id(resource_conn, session_id)
+            except Exception:
+                if resource_conn is not None:
+                    try:
+                        resource_conn.close()
+                    except Exception:
+                        pass
+                resource_conn = None
+                resource_chat_id = None
+
+            merged: list[dict[str, Any]] = []
+            sender_usernames: list[str] = []
+            quote_usernames: list[str] = []
+            pat_usernames: set[str] = set()
+            _append_full_messages_from_rows(
+                merged=merged,
+                sender_usernames=sender_usernames,
+                quote_usernames=quote_usernames,
+                pat_usernames=pat_usernames,
+                rows=[row],
+                db_path=msg_db_path_out,
+                table_name=table_name,
+                username=session_id,
+                account_dir=account_dir,
+                is_group=bool(session_id.endswith("@chatroom")),
+                my_rowid=my_rowid,
+                resource_conn=resource_conn,
+                resource_chat_id=resource_chat_id,
+            )
+            _postprocess_full_messages(
+                merged=merged,
+                sender_usernames=sender_usernames,
+                quote_usernames=quote_usernames,
+                pat_usernames=pat_usernames,
+                account_dir=account_dir,
+                username=session_id,
+                base_url=base_url,
+                contact_db_path=account_dir / "contact.db",
+                head_image_db_path=account_dir / "head_image.db",
+            )
+            if merged:
+                updated_message = merged[0]
+            if resource_conn is not None:
+                try:
+                    resource_conn.close()
+                except Exception:
+                    pass
+        conn_msg.close()
+    except Exception:
+        updated_message = None
+
+    resp: dict[str, Any] = {
+        "status": "success",
+        "account": account_dir.name,
+        "session_id": session_id,
+        "messageId": f"{db_stem}:{table_name}:{int(new_local_id)}",
+    }
+    if warnings:
+        resp["warnings"] = warnings
+    if updated_message is not None:
+        resp["updated_message"] = updated_message
+    return resp
+
+
+@router.get("/api/chat/edits/sessions", summary="获取有修改记录的会话列表")
+def list_chat_edited_sessions(request: Request, account: Optional[str] = None) -> dict[str, Any]:
+    account_dir = _resolve_account_dir(account)
+    base_url = str(request.base_url).rstrip("/")
+
+    stats = chat_edit_store.list_sessions(account_dir.name)
+    session_ids = [str(s.get("session_id") or "").strip() for s in stats if str(s.get("session_id") or "").strip()]
+    contact_db_path = account_dir / "contact.db"
+    contact_rows = _load_contact_rows(contact_db_path, session_ids)
+
+    sessions: list[dict[str, Any]] = []
+    for s in stats:
+        uname = str(s.get("session_id") or "").strip()
+        if not uname:
+            continue
+        row = contact_rows.get(uname)
+        name = _pick_display_name(row, uname) if row is not None else uname
+        avatar = base_url + _avatar_url_unified(account_dir=account_dir, username=uname)
+        sessions.append(
+            {
+                "username": uname,
+                "name": name,
+                "avatar": avatar,
+                "isGroup": bool(uname.endswith("@chatroom")),
+                "editedCount": int(s.get("msg_count") or 0),
+                "lastEditedAt": int(s.get("last_edited_at") or 0),
+            }
+        )
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "sessions": sessions,
+    }
+
+
+@router.get("/api/chat/edits/messages", summary="获取某会话下所有被修改过的消息（原/现对比）")
+def list_chat_edited_messages(
+    request: Request,
+    username: str,
+    account: Optional[str] = None,
+) -> dict[str, Any]:
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username.")
+    account_dir = _resolve_account_dir(account)
+    base_url = str(request.base_url).rstrip("/")
+
+    edits = chat_edit_store.list_messages(account_dir.name, username)
+    if not edits:
+        return {"status": "success", "account": account_dir.name, "username": username, "items": []}
+
+    # Open resource DB once (optional).
+    resource_conn: Optional[sqlite3.Connection] = None
+    resource_chat_id: Optional[int] = None
+    out_res_db_path = account_dir / "message_resource.db"
+    try:
+        if out_res_db_path.exists():
+            resource_conn = sqlite3.connect(str(out_res_db_path))
+            resource_conn.row_factory = sqlite3.Row
+            resource_chat_id = _resource_lookup_chat_id(resource_conn, username)
+    except Exception:
+        if resource_conn is not None:
+            try:
+                resource_conn.close()
+            except Exception:
+                pass
+
+        resource_conn = None
+        resource_chat_id = None
+
+    is_group = bool(username.endswith("@chatroom"))
+
+    msg_conns: dict[str, sqlite3.Connection] = {}
+    my_rowids: dict[str, Optional[int]] = {}
+
+    merged_current: list[dict[str, Any]] = []
+    sender_usernames_current: list[str] = []
+    quote_usernames_current: list[str] = []
+    pat_usernames_current: set[str] = set()
+
+    merged_original: list[dict[str, Any]] = []
+    sender_usernames_original: list[str] = []
+    quote_usernames_original: list[str] = []
+    pat_usernames_original: set[str] = set()
+
+    current_raw_by_id: dict[str, dict[str, Any]] = {}
+    original_raw_by_id: dict[str, Any] = {}
+
+    try:
+        for rec in edits:
+            db_stem = str(rec.get("db") or "").strip()
+            table_name = str(rec.get("table_name") or "").strip()
+            try:
+                local_id = int(rec.get("local_id") or 0)
+            except Exception:
+                local_id = 0
+            if not db_stem or not table_name or local_id <= 0:
+                continue
+
+            message_id = str(rec.get("message_id") or "").strip() or f"{db_stem}:{table_name}:{int(local_id)}"
+
+            conn_msg = msg_conns.get(db_stem)
+            if conn_msg is None:
+                db_path_out = account_dir / f"{db_stem}.db"
+                if not db_path_out.exists():
+                    continue
+                conn_msg = sqlite3.connect(str(db_path_out))
+                conn_msg.row_factory = sqlite3.Row
+                conn_msg.text_factory = bytes
+                msg_conns[db_stem] = conn_msg
+                my_rowids[db_stem] = _lookup_output_my_rowid(conn_msg, account_dir.name)
+
+            row_cur = _select_output_message_row(conn_msg, table_name=table_name, local_id=local_id)
+            if row_cur is not None:
+                _append_full_messages_from_rows(
+                    merged=merged_current,
+                    sender_usernames=sender_usernames_current,
+                    quote_usernames=quote_usernames_current,
+                    pat_usernames=pat_usernames_current,
+                    rows=[row_cur],
+                    db_path=account_dir / f"{db_stem}.db",
+                    table_name=table_name,
+                    username=username,
+                    account_dir=account_dir,
+                    is_group=is_group,
+                    my_rowid=my_rowids.get(db_stem),
+                    resource_conn=resource_conn,
+                    resource_chat_id=resource_chat_id,
+                )
+                cur_raw: dict[str, Any] = {}
+                for k in row_cur.keys():
+                    cur_raw[str(k)] = _jsonify_db_value(str(k), row_cur[k])
+                current_raw_by_id[message_id] = cur_raw
+
+            # Original raw snapshot (for UI raw display)
+            try:
+                original_raw_by_id[message_id] = json.loads(str(rec.get("original_msg_json") or "") or "null")
+            except Exception:
+                original_raw_by_id[message_id] = None
+
+            # Original row for rendering
+            try:
+                orig_row = chat_edit_store.loads_json_with_blobs(str(rec.get("original_msg_json") or "") or "")
+            except Exception:
+                orig_row = None
+            if isinstance(orig_row, dict):
+                try:
+                    rsid = int(orig_row.get("real_sender_id") or 0)
+                except Exception:
+                    rsid = 0
+                sender_username = _lookup_output_username_by_rowid(conn_msg, rsid) if rsid > 0 else ""
+                orig_row["sender_username"] = sender_username
+                orig_row.setdefault("packed_info_data", None)
+                _append_full_messages_from_rows(
+                    merged=merged_original,
+                    sender_usernames=sender_usernames_original,
+                    quote_usernames=quote_usernames_original,
+                    pat_usernames=pat_usernames_original,
+                    rows=[orig_row],
+                    db_path=account_dir / f"{db_stem}.db",
+                    table_name=table_name,
+                    username=username,
+                    account_dir=account_dir,
+                    is_group=is_group,
+                    my_rowid=my_rowids.get(db_stem),
+                    resource_conn=resource_conn,
+                    resource_chat_id=resource_chat_id,
+                )
+
+        if merged_current:
+            _postprocess_full_messages(
+                merged=merged_current,
+                sender_usernames=sender_usernames_current,
+                quote_usernames=quote_usernames_current,
+                pat_usernames=pat_usernames_current,
+                account_dir=account_dir,
+                username=username,
+                base_url=base_url,
+                contact_db_path=account_dir / "contact.db",
+                head_image_db_path=account_dir / "head_image.db",
+            )
+        if merged_original:
+            _postprocess_full_messages(
+                merged=merged_original,
+                sender_usernames=sender_usernames_original,
+                quote_usernames=quote_usernames_original,
+                pat_usernames=pat_usernames_original,
+                account_dir=account_dir,
+                username=username,
+                base_url=base_url,
+                contact_db_path=account_dir / "contact.db",
+                head_image_db_path=account_dir / "head_image.db",
+            )
+
+        current_by_id = {str(m.get("id") or ""): m for m in merged_current if str(m.get("id") or "").strip()}
+        original_by_id = {str(m.get("id") or ""): m for m in merged_original if str(m.get("id") or "").strip()}
+
+        items: list[dict[str, Any]] = []
+        for rec in edits:
+            mid = str(rec.get("message_id") or "").strip()
+            if not mid:
+                try:
+                    mid = chat_edit_store.format_message_id(
+                        rec.get("db") or "",
+                        rec.get("table_name") or "",
+                        int(rec.get("local_id") or 0),
+                    )
+                except Exception:
+                    mid = ""
+            if not mid:
+                continue
+            items.append(
+                {
+                    "messageId": mid,
+                    "firstEditedAt": int(rec.get("first_edited_at") or 0),
+                    "lastEditedAt": int(rec.get("last_edited_at") or 0),
+                    "editCount": int(rec.get("edit_count") or 0),
+                    "original": original_by_id.get(mid),
+                    "current": current_by_id.get(mid),
+                    "originalRaw": original_raw_by_id.get(mid),
+                    "currentRaw": current_raw_by_id.get(mid),
+                }
+            )
+
+        items.sort(key=lambda x: int(((x.get("current") or x.get("original") or {}) or {}).get("createTime") or 0))
+        return {
+            "status": "success",
+            "account": account_dir.name,
+            "username": username,
+            "items": items,
+        }
+    finally:
+        for c in msg_conns.values():
+            try:
+                c.close()
+            except Exception:
+                pass
+        if resource_conn is not None:
+            try:
+                resource_conn.close()
+            except Exception:
+                pass
+
+
+@router.get("/api/chat/edits/message_status", summary="某条消息是否被本工具修改过")
+def get_chat_edit_status(*, account: Optional[str] = None, username: str, message_id: str) -> dict[str, Any]:
+    if not username:
+        raise HTTPException(status_code=400, detail="Missing username.")
+    if not message_id:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+    account_dir = _resolve_account_dir(account)
+    item = chat_edit_store.get_message_edit(account_dir.name, username, message_id)
+    if not item:
+        return {"modified": False}
+    return {
+        "modified": True,
+        "firstEditedAt": int(item.get("first_edited_at") or 0),
+        "lastEditedAt": int(item.get("last_edited_at") or 0),
+        "editCount": int(item.get("edit_count") or 0),
+    }
+
+
+@router.post("/api/chat/messages/repair_sender", summary="修复某条消息的发送者（real_sender_id）")
+async def repair_chat_message_sender(request: Request) -> dict[str, Any]:
+    """Repair message sender for cases where an incorrect reset wrote wrong metadata.
+
+    Currently this supports forcing the message to be treated as "sent by me" by setting
+    `real_sender_id` to the account's Name2Id rowid, in both db_storage and output DB.
+    """
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+
+    account = str(payload.get("account") or "").strip() or None
+    session_id = str(payload.get("session_id") or payload.get("username") or payload.get("sessionId") or "").strip()
+    message_id = str(payload.get("message_id") or payload.get("messageId") or "").strip()
+    mode = str(payload.get("mode") or "me").strip().lower()
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
+    if not message_id:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+    if mode not in {"me"}:
+        raise HTTPException(status_code=400, detail="Unsupported mode.")
+
+    account_dir = _resolve_account_dir(account)
+    try:
+        db_stem, table_name_in, local_id = chat_edit_store.parse_message_id(message_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message_id.")
+
+    msg_db_path_out = account_dir / f"{db_stem}.db"
+    if not msg_db_path_out.exists():
+        raise HTTPException(status_code=404, detail="Message database not found.")
+
+    msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, db_stem)
+    if not msg_db_path_real.exists():
+        raise HTTPException(status_code=404, detail="Real message database not found in db_storage.")
+
+    # Resolve output table name casing and the "my" rowid for this message DB.
+    table_name_out = ""
+    my_rowid_out: Optional[int] = None
+    conn_probe: Optional[sqlite3.Connection] = None
+    try:
+        conn_probe = sqlite3.connect(str(msg_db_path_out), timeout=5)
+        conn_probe.row_factory = sqlite3.Row
+        table_name_out = _normalize_table_name_case(conn_probe, table_name_in) or ""
+        if not table_name_out:
+            raise HTTPException(status_code=404, detail="Message table not found.")
+
+        r = conn_probe.execute(
+            "SELECT rowid FROM Name2Id WHERE user_name = ? ORDER BY rowid ASC LIMIT 1",
+            (account_dir.name,),
+        ).fetchone()
+        if r is not None:
+            try:
+                my_rowid_out = int(r[0])
+            except Exception:
+                my_rowid_out = None
+    finally:
+        if conn_probe is not None:
+            try:
+                conn_probe.close()
+            except Exception:
+                pass
+
+    if my_rowid_out is None or my_rowid_out <= 0:
+        raise HTTPException(status_code=404, detail="Name2Id row not found for account in output db.")
+
+    with _realtime_sync_lock(account_dir.name, session_id):
+        try:
+            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+        except WCDBRealtimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Resolve "my" rowid from the live db_storage message DB.
+        sql_my = (
+            "SELECT rowid FROM Name2Id WHERE user_name = "
+            + _sql_literal(account_dir.name)
+            + " ORDER BY rowid ASC LIMIT 1"
+        )
+        with wcdb_conn.lock:
+            rows = _wcdb_exec_query(wcdb_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_my)
+
+        my_rowid_real = 0
+        if rows and isinstance(rows[0], dict):
+            for k, v in rows[0].items():
+                if str(k or "").strip().lower() == "rowid":
+                    try:
+                        my_rowid_real = int(v or 0)
+                    except Exception:
+                        my_rowid_real = 0
+                    break
+
+        if my_rowid_real <= 0:
+            raise HTTPException(status_code=404, detail="Name2Id row not found for account in real db_storage.")
+
+        # 1) Update real db_storage (source of truth).
+        try:
+            sql_real = _build_wcdb_update_sql(
+                table_name=table_name_in,
+                updates={"real_sender_id": int(my_rowid_real)},
+                where_local_id=int(local_id),
+            )
+            with wcdb_conn.lock:
+                _wcdb_exec_query(wcdb_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_real)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update real db_storage: {e}")
+
+        # 2) Sync output decrypted DB so UI reflects the change immediately.
+        try:
+            conn_out = sqlite3.connect(str(msg_db_path_out), timeout=5)
+            try:
+                sql_out, params_out = _build_sqlite_update_sql(
+                    table_name=table_name_out,
+                    updates={"real_sender_id": int(my_rowid_out)},
+                    where_local_id=int(local_id),
+                )
+                conn_out.execute(sql_out, params_out)
+                conn_out.commit()
+            finally:
+                conn_out.close()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to update output db: {e}")
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "sessionId": session_id,
+        "messageId": f"{db_stem}:{table_name_out or table_name_in}:{int(local_id)}",
+        "mode": mode,
+    }
+
+
+@router.post("/api/chat/messages/flip_direction", summary="反转某条消息在微信客户端的左右位置（packed_info_data）")
+async def flip_chat_message_direction(request: Request) -> dict[str, Any]:
+    """Flip a message's bubble side in the *WeChat client* by swapping from/to in packed_info_data.
+
+    Note: this intentionally edits `packed_info_data` (a protobuf-like BLOB). It is risky.
+    A snapshot is recorded so users can undo via `/api/chat/edits/reset_message`.
+    """
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+
+    account = str(payload.get("account") or "").strip() or None
+    session_id = str(payload.get("session_id") or payload.get("username") or payload.get("sessionId") or "").strip()
+    message_id_in = str(payload.get("message_id") or payload.get("messageId") or "").strip()
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
+    if not message_id_in:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+
+    account_dir = _resolve_account_dir(account)
+    try:
+        db_stem, table_name_in, local_id = chat_edit_store.parse_message_id(message_id_in)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message_id.")
+
+    msg_db_path_out = account_dir / f"{db_stem}.db"
+    if not msg_db_path_out.exists():
+        raise HTTPException(status_code=404, detail="Message database not found.")
+
+    msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, db_stem)
+    if not msg_db_path_real.exists():
+        raise HTTPException(status_code=404, detail="Real message database not found in db_storage.")
+
+    def _coerce_packed_bytes(value: Any) -> Optional[bytes]:
+        if value is None:
+            return None
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if isinstance(value, bytearray):
+            value = bytes(value)
+        if isinstance(value, bytes):
+            # If a past bug stored the blob as TEXT hex, sqlite may return ASCII bytes here.
+            try:
+                s = value.decode("ascii").strip()
+            except Exception:
+                return value
+            if not s:
+                return b""
+            b = _hex_to_bytes(s)
+            if b is not None:
+                return b
+            if (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
+                try:
+                    return bytes.fromhex(s)
+                except Exception:
+                    return value
+            return value
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return b""
+            b = _hex_to_bytes(s)
+            if b is not None:
+                return b
+            if (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
+                try:
+                    return bytes.fromhex(s)
+                except Exception:
+                    return None
+            return s.encode("utf-8", errors="replace")
+        return None
+
+    # Resolve output table name casing and read packed_info_data bytes from output DB.
+    table_name_out = ""
+    packed_before: Optional[bytes] = None
+    conn_out_probe: Optional[sqlite3.Connection] = None
+    try:
+        conn_out_probe = sqlite3.connect(str(msg_db_path_out), timeout=5)
+        conn_out_probe.row_factory = sqlite3.Row
+        conn_out_probe.text_factory = bytes
+        table_name_out = _normalize_table_name_case(conn_out_probe, table_name_in) or ""
+        if not table_name_out:
+            raise HTTPException(status_code=404, detail="Message table not found.")
+        cols = _table_info_columns(conn_out_probe, table_name_out)
+        if not cols or ("packed_info_data" not in cols):
+            raise HTTPException(status_code=400, detail="packed_info_data column not found.")
+        quoted = _quote_ident(table_name_out)
+        row = conn_out_probe.execute(
+            f"SELECT packed_info_data FROM {quoted} WHERE local_id = ? LIMIT 1",
+            (int(local_id),),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Message not found in output database.")
+        packed_before = _coerce_packed_bytes(row["packed_info_data"])
+    finally:
+        if conn_out_probe is not None:
+            try:
+                conn_out_probe.close()
+            except Exception:
+                pass
+
+    if not packed_before:
+        raise HTTPException(status_code=400, detail="packed_info_data is empty; cannot flip direction.")
+
+    try:
+        packed_after, old_from_id, old_to_id = _swap_packed_info_from_to(packed_before)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot flip packed_info_data: {e}")
+
+    # Apply to output DB first, then real db_storage. Record snapshot so users can undo.
+    message_id = f"{db_stem}:{table_name_out or table_name_in}:{int(local_id)}"
+    created_record = False
+
+    with _realtime_sync_lock(account_dir.name, session_id):
+        try:
+            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+        except WCDBRealtimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Snapshot original row from real db_storage (only once).
+        existing_record = chat_edit_store.get_message_edit(account_dir.name, session_id, message_id)
+        if existing_record is None:
+            try:
+                select_sql = f"SELECT * FROM {_quote_ident(table_name_in)} WHERE local_id = {int(local_id)} LIMIT 1"
+                with wcdb_conn.lock:
+                    rows = _wcdb_exec_query(
+                        wcdb_conn.handle,
+                        kind="message",
+                        path=str(msg_db_path_real),
+                        sql=select_sql,
+                    )
+                if not rows or not isinstance(rows[0], dict):
+                    raise HTTPException(status_code=404, detail="Message not found in real db_storage.")
+                original_row = rows[0]
+
+                chat_edit_store.upsert_original_once(
+                    account=account_dir.name,
+                    session_id=session_id,
+                    db=db_stem,
+                    table_name=table_name_out or table_name_in,
+                    local_id=int(local_id),
+                    original_msg=original_row,
+                    original_resource=None,
+                    now_ms=int(time.time() * 1000),
+                )
+                created_record = True
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to write edit snapshot: {e}")
+
+        # 1) Update output decrypted DB (so UI can show it in raw view).
+        try:
+            conn_out = sqlite3.connect(str(msg_db_path_out), timeout=5)
+            try:
+                sql_out, params_out = _build_sqlite_update_sql(
+                    table_name=table_name_out,
+                    updates={"packed_info_data": packed_after},
+                    where_local_id=int(local_id),
+                )
+                cur = conn_out.execute(sql_out, params_out)
+                conn_out.commit()
+                if int(getattr(cur, "rowcount", 0) or 0) <= 0:
+                    raise HTTPException(status_code=404, detail="Message not found in output database.")
+            finally:
+                conn_out.close()
+        except HTTPException:
+            if created_record:
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                except Exception:
+                    pass
+            raise
+        except Exception as e:
+            if created_record:
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Failed to update output database: {e}")
+
+        # 2) Update real db_storage (source of truth). Rollback output on failure.
+        try:
+            sql_real = _build_wcdb_update_sql(
+                table_name=table_name_in,
+                updates={"packed_info_data": packed_after},
+                where_local_id=int(local_id),
+            )
+            with wcdb_conn.lock:
+                _wcdb_exec_query(wcdb_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_real)
+        except Exception as e:
+            # Roll back output changes.
+            try:
+                conn_rb = sqlite3.connect(str(msg_db_path_out), timeout=5)
+                try:
+                    sql_rb, params_rb = _build_sqlite_update_sql(
+                        table_name=table_name_out,
+                        updates={"packed_info_data": packed_before},
+                        where_local_id=int(local_id),
+                    )
+                    conn_rb.execute(sql_rb, params_rb)
+                    conn_rb.commit()
+                finally:
+                    conn_rb.close()
+            except Exception:
+                pass
+
+            if created_record:
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Failed to update real db_storage: {e}")
+
+        # Track which columns were modified so reset restores only those.
+        try:
+            chat_edit_store.merge_edited_columns(
+                account=account_dir.name,
+                session_id=session_id,
+                db=db_stem,
+                table_name=table_name_out or table_name_in,
+                local_id=int(local_id),
+                columns=["packed_info_data"],
+            )
+        except Exception:
+            pass
+
+        # Bump edit metadata for already-tracked messages.
+        if existing_record is not None:
+            try:
+                chat_edit_store.upsert_original_once(
+                    account=account_dir.name,
+                    session_id=session_id,
+                    db=db_stem,
+                    table_name=table_name_out or table_name_in,
+                    local_id=int(local_id),
+                    original_msg={},
+                    original_resource=None,
+                    now_ms=int(time.time() * 1000),
+                )
+            except Exception:
+                pass
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "sessionId": session_id,
+        "messageId": message_id,
+        "before": {
+            "packed_info_data": _bytes_to_hex(packed_before),
+            "fromId": int(old_from_id),
+            "toId": int(old_to_id),
+        },
+        "after": {
+            "packed_info_data": _bytes_to_hex(packed_after),
+            "fromId": int(old_to_id),
+            "toId": int(old_from_id),
+        },
+    }
+
+
+def _restore_message_from_snapshot(
+    *,
+    account_dir: Path,
+    session_id: str,
+    message_id: str,
+    record: dict[str, Any],
+    wcdb_conn,
+) -> None:
+    db_stem, table_name, local_id_current = chat_edit_store.parse_message_id(message_id)
+    msg_db_path_out = account_dir / f"{db_stem}.db"
+    if not msg_db_path_out.exists():
+        raise HTTPException(status_code=404, detail="Message database not found.")
+
+    msg_db_path_real, res_db_path_real = _resolve_db_storage_message_paths(account_dir, db_stem)
+    if not msg_db_path_real.exists():
+        raise HTTPException(status_code=404, detail="Real message database not found in db_storage.")
+
+    original_msg = chat_edit_store.loads_json_with_blobs(str(record.get("original_msg_json") or "") or "")
+    if not isinstance(original_msg, dict):
+        raise HTTPException(status_code=500, detail="Invalid original snapshot.")
+
+    original_resource = None
+    if str(record.get("original_resource_json") or ""):
+        try:
+            original_resource = chat_edit_store.loads_json_with_blobs(str(record.get("original_resource_json") or "") or "")
+        except Exception:
+            original_resource = None
+
+    edited_cols: set[str] = set()
+    try:
+        raw = str(record.get("edited_cols_json") or "").strip()
+        if raw:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                edited_cols = {str(x or "").strip().lower() for x in v if str(x or "").strip()}
+    except Exception:
+        edited_cols = set()
+
+    # Backward compatible default: older records didn't track edited columns.
+    if not edited_cols:
+        edited_cols = {"message_content", "compress_content"}
+
+    # Editing content implicitly clears compress_content unless explicitly provided.
+    if "message_content" in edited_cols:
+        edited_cols.add("compress_content")
+
+    orig_key_map = {str(k or "").strip().lower(): str(k) for k in original_msg.keys()}
+
+    # Read current create_time from real db to call wcdb_update_message reliably.
+    cur_create_time = 0
+    try:
+        sql_ct = f"SELECT create_time FROM {_quote_ident(table_name)} WHERE local_id = {int(local_id_current)} LIMIT 1"
+        with wcdb_conn.lock:
+            rows = _wcdb_exec_query(wcdb_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_ct)
+        if rows and isinstance(rows[0], dict):
+            cur_create_time = int(rows[0].get("create_time") or 0)
+    except Exception:
+        cur_create_time = 0
+    if cur_create_time <= 0:
+        raise HTTPException(status_code=404, detail="Message not found in real db_storage.")
+
+    # Restore message_content via wcdb_update_message (best-effort).
+    # Some builds store message_content as an encrypted/compressed BLOB; WCDB exec_query may return it as bare hex.
+    # In that case, don't call update_message with the hex string; restoring the raw column bytes below is safer.
+    if "message_content" in edited_cols and "message_content" in orig_key_map:
+        try:
+            content = original_msg.get(orig_key_map["message_content"])
+            if isinstance(content, str):
+                s = content.strip()
+                if s and (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
+                    s_lower = s.lower()
+                    if (len(s) >= 64) or (s_lower.startswith("28b52ffd") and len(s) >= 16):
+                        content = None
+            if isinstance(content, (bytes, bytearray, memoryview)):
+                try:
+                    content = bytes(content).decode("utf-8", errors="replace")
+                except Exception:
+                    content = ""
+            if content is not None:
+                _wcdb_update_message(
+                    wcdb_conn.handle,
+                    session_id=session_id,
+                    local_id=int(local_id_current),
+                    create_time=int(cur_create_time),
+                    new_content=str(content or ""),
+                )
+        except Exception:
+            pass
+
+    # Restore only columns that were actually edited by the tool.
+    try:
+        restore_updates: dict[str, Any] = {}
+        for col_lc in sorted(edited_cols):
+            k = orig_key_map.get(col_lc)
+            if not k:
+                continue
+            restore_updates[k] = _normalize_edit_value(k, original_msg.get(k), from_snapshot=True)
+
+        if restore_updates:
+            sql_real = _build_wcdb_update_sql(
+                table_name=table_name,
+                updates=restore_updates,
+                where_local_id=int(local_id_current),
+            )
+            with wcdb_conn.lock:
+                _wcdb_exec_query(wcdb_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_real)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore real db_storage: {e}")
+
+    # Restore output decrypted Msg_*.
+    try:
+        conn_out = sqlite3.connect(str(msg_db_path_out), timeout=5)
+        try:
+            tnorm = _normalize_table_name_case(conn_out, table_name)
+            if not tnorm:
+                raise HTTPException(status_code=404, detail="Message table not found.")
+            cols = _table_info_columns(conn_out, tnorm)
+            col_map = {str(c or "").strip().lower(): str(c) for c in cols if str(c or "").strip()}
+            restore_out: dict[str, Any] = {}
+            for col_lc in sorted(edited_cols):
+                col = col_map.get(col_lc)
+                k = orig_key_map.get(col_lc)
+                if not col or not k:
+                    continue
+                restore_out[col] = _normalize_edit_value(col, original_msg.get(k), from_snapshot=True)
+
+            if restore_out:
+                sql_out, params = _build_sqlite_update_sql(
+                    table_name=tnorm,
+                    updates=restore_out,
+                    where_local_id=int(local_id_current),
+                )
+                conn_out.execute(sql_out, params)
+                conn_out.commit()
+        finally:
+            conn_out.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore output database: {e}")
+
+    # Restore message_resource key fields (best-effort, by message_id).
+    need_restore_resource = any(
+        k in edited_cols for k in {"local_type", "create_time", "server_id", "origin_source", "local_id"}
+    )
+    if need_restore_resource and isinstance(original_resource, dict):
+        try:
+            res_message_id = int(original_resource.get("message_id") or 0)
+        except Exception:
+            res_message_id = 0
+        if res_message_id > 0:
+            restore_res: dict[str, Any] = {}
+            msg_to_res = {
+                "local_type": "message_local_type",
+                "create_time": "message_create_time",
+                "server_id": "message_svr_id",
+                "origin_source": "message_origin_source",
+                "local_id": "message_local_id",
+            }
+            for msg_col, res_col in msg_to_res.items():
+                if msg_col not in edited_cols:
+                    continue
+                if res_col in original_resource:
+                    restore_res[res_col] = _normalize_edit_value(res_col, original_resource.get(res_col), from_snapshot=True)
+            if restore_res:
+                try:
+                    parts = [f"{_quote_ident(k)} = {_sql_literal(v)}" for k, v in restore_res.items()]
+                    sql_res_real = (
+                        "UPDATE MessageResourceInfo SET " + ", ".join(parts) + f" WHERE message_id = {int(res_message_id)}"
+                    )
+                    if res_db_path_real.exists():
+                        with wcdb_conn.lock:
+                            _wcdb_exec_query(
+                                wcdb_conn.handle,
+                                kind="message",
+                                path=str(res_db_path_real),
+                                sql=sql_res_real,
+                            )
+                except Exception:
+                    pass
+
+                try:
+                    out_res_db_path = account_dir / "message_resource.db"
+                    if out_res_db_path.exists():
+                        conn_res = sqlite3.connect(str(out_res_db_path), timeout=5)
+                        try:
+                            set_cols = ", ".join([f"{_quote_ident(k)} = ?" for k in restore_res.keys()])
+                            params = list(restore_res.values()) + [int(res_message_id)]
+                            conn_res.execute(f"UPDATE MessageResourceInfo SET {set_cols} WHERE message_id = ?", params)
+                            conn_res.commit()
+                        finally:
+                            conn_res.close()
+                except Exception:
+                    pass
+
+
+@router.post("/api/chat/edits/reset_message", summary="恢复某条消息到首次快照，并删除修改记录")
+async def reset_chat_edited_message(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+
+    account = str(payload.get("account") or "").strip() or None
+    session_id = str(payload.get("session_id") or payload.get("username") or payload.get("sessionId") or "").strip()
+    message_id = str(payload.get("message_id") or payload.get("messageId") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
+    if not message_id:
+        raise HTTPException(status_code=400, detail="Missing message_id.")
+
+    account_dir = _resolve_account_dir(account)
+    record = chat_edit_store.get_message_edit(account_dir.name, session_id, message_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Edit record not found.")
+
+    with _realtime_sync_lock(account_dir.name, session_id):
+        try:
+            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+        except WCDBRealtimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        _restore_message_from_snapshot(
+            account_dir=account_dir,
+            session_id=session_id,
+            message_id=message_id,
+            record=record,
+            wcdb_conn=wcdb_conn,
+        )
+
+        try:
+            chat_edit_store.delete_message_edit(account_dir.name, session_id, message_id)
+        except Exception:
+            pass
+
+    return {"status": "success"}
+
+
+@router.post("/api/chat/edits/reset_session", summary="一键恢复某会话下全部修改记录")
+async def reset_chat_edited_session(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+
+    account = str(payload.get("account") or "").strip() or None
+    session_id = str(payload.get("session_id") or payload.get("username") or payload.get("sessionId") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
+
+    account_dir = _resolve_account_dir(account)
+    records = chat_edit_store.list_messages(account_dir.name, session_id)
+    if not records:
+        return {"status": "success", "restored": 0, "failed": 0, "failures": []}
+
+    restored = 0
+    failures: list[dict[str, Any]] = []
+
+    with _realtime_sync_lock(account_dir.name, session_id):
+        try:
+            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
+        except WCDBRealtimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        for rec in records:
+            mid = str(rec.get("message_id") or "").strip()
+            if not mid:
+                try:
+                    mid = chat_edit_store.format_message_id(
+                        rec.get("db") or "",
+                        rec.get("table_name") or "",
+                        int(rec.get("local_id") or 0),
+                    )
+                except Exception:
+                    mid = ""
+            if not mid:
+                continue
+            try:
+                _restore_message_from_snapshot(
+                    account_dir=account_dir,
+                    session_id=session_id,
+                    message_id=mid,
+                    record=rec,
+                    wcdb_conn=wcdb_conn,
+                )
+                try:
+                    chat_edit_store.delete_message_edit(account_dir.name, session_id, mid)
+                except Exception:
+                    pass
+                restored += 1
+            except Exception as e:
+                failures.append({"messageId": mid, "error": str(e)})
+
+    return {"status": "success", "restored": int(restored), "failed": int(len(failures)), "failures": failures}

@@ -60,6 +60,13 @@ def _year_range_epoch_seconds(year: int) -> tuple[int, int]:
     return start, end
 
 
+def _days_in_year(year: int) -> int:
+    try:
+        return int((datetime(int(year) + 1, 1, 1) - datetime(int(year), 1, 1)).days)
+    except Exception:
+        return 365
+
+
 def _list_message_tables(conn: sqlite3.Connection) -> list[str]:
     try:
         rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -69,11 +76,223 @@ def _list_message_tables(conn: sqlite3.Connection) -> list[str]:
     for r in rows:
         if not r or not r[0]:
             continue
-        name = str(r[0])
+        name = _decode_sqlite_text(r[0]).strip()
+        if not name:
+            continue
         ln = name.lower()
         if ln.startswith(("msg_", "chat_")):
             names.append(name)
     return names
+
+
+def _accumulate_db_daily_counts(
+    *,
+    db_path: Path,
+    start_ts: int,
+    end_ts: int,
+    counts: list[int],
+    sender_username: str | None = None,
+) -> int:
+    """Accumulate per-day message counts from one message shard DB into counts list.
+
+    Returns the number of messages counted.
+    """
+
+    if not db_path.exists():
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+
+        tables = _list_message_tables(conn)
+        if not tables:
+            return 0
+
+        # Convert millisecond timestamps defensively.
+        # The expression yields epoch seconds as INTEGER.
+        ts_expr = (
+            "CASE WHEN create_time > 1000000000000 THEN CAST(create_time/1000 AS INTEGER) ELSE create_time END"
+        )
+
+        # Optional sender filter (best-effort). When provided, we only count
+        # messages whose `real_sender_id` maps to `sender_username`.
+        sender_rowid: int | None = None
+        if sender_username and str(sender_username).strip():
+            try:
+                r = conn.execute(
+                    "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
+                    (str(sender_username).strip(),),
+                ).fetchone()
+                if r is not None and r[0] is not None:
+                    sender_rowid = int(r[0])
+            except Exception:
+                sender_rowid = None
+
+        counted = 0
+        for table_name in tables:
+            qt = _quote_ident(table_name)
+            sender_where = ""
+            params: tuple[Any, ...]
+            if sender_rowid is not None:
+                sender_where = " AND real_sender_id = ?"
+                params = (start_ts, end_ts, sender_rowid)
+            else:
+                params = (start_ts, end_ts)
+
+            sql = (
+                "SELECT CAST(strftime('%j', datetime(ts, 'unixepoch', 'localtime')) AS INTEGER) - 1 AS doy, "
+                "COUNT(1) AS cnt "
+                "FROM ("
+                f"  SELECT {ts_expr} AS ts"
+                f"  FROM {qt}"
+                f"  WHERE {ts_expr} >= ? AND {ts_expr} < ?{sender_where}"
+                ") sub "
+                "GROUP BY doy"
+            )
+
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except Exception:
+                continue
+
+            for doy, cnt in rows:
+                try:
+                    d = int(doy if doy is not None else -1)
+                    c = int(cnt or 0)
+                except Exception:
+                    continue
+                if c <= 0 or d < 0 or d >= len(counts):
+                    continue
+                counts[d] += c
+                counted += c
+
+        return counted
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def compute_annual_daily_counts(*, account_dir: Path, year: int, sender_username: str | None = None) -> list[int]:
+    """Compute per-day message counts for the given year.
+
+    The output is a 0-indexed day-of-year list (length 365/366). Counts default to
+    "messages sent by me" when sender_username is provided.
+    """
+
+    start_ts, end_ts = _year_range_epoch_seconds(year)
+    days = _days_in_year(year)
+    counts: list[int] = [0 for _ in range(days)]
+
+    sender = str(sender_username or "").strip()
+
+    # Prefer using our unified search index if available; it's much faster than scanning all msg tables.
+    index_path = get_chat_search_index_db_path(account_dir)
+    if index_path.exists():
+        conn = sqlite3.connect(str(index_path))
+        try:
+            has_fts = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_fts' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+            if has_fts:
+                # Convert millisecond timestamps defensively (some datasets store ms).
+                ts_expr = (
+                    "CASE "
+                    "WHEN CAST(create_time AS INTEGER) > 1000000000000 "
+                    "THEN CAST(CAST(create_time AS INTEGER)/1000 AS INTEGER) "
+                    "ELSE CAST(create_time AS INTEGER) "
+                    "END"
+                )
+                sender_clause = ""
+                if sender:
+                    sender_clause = "    AND sender_username = ?"
+
+                sql = (
+                    "SELECT "
+                    "CAST(strftime('%j', datetime(ts, 'unixepoch', 'localtime')) AS INTEGER) - 1 AS doy, "
+                    "COUNT(1) AS cnt "
+                    "FROM ("
+                    f"  SELECT {ts_expr} AS ts"
+                    "  FROM message_fts"
+                    f"  WHERE {ts_expr} >= ? AND {ts_expr} < ?"
+                    "    AND db_stem NOT LIKE 'biz_message%'"
+                    f"{sender_clause}"
+                    ") sub "
+                    "GROUP BY doy"
+                )
+
+                t0 = time.time()
+                try:
+                    params: tuple[Any, ...] = (start_ts, end_ts)
+                    if sender:
+                        params = (start_ts, end_ts, sender)
+                    rows = conn.execute(sql, params).fetchall()
+                except Exception:
+                    rows = []
+
+                total = 0
+                for r in rows:
+                    if not r:
+                        continue
+                    try:
+                        doy = int(r[0] if r[0] is not None else -1)
+                        cnt = int(r[1] or 0)
+                    except Exception:
+                        continue
+                    if cnt <= 0 or doy < 0 or doy >= days:
+                        continue
+                    counts[doy] += cnt
+                    total += cnt
+
+                logger.info(
+                    "Wrapped annual heatmap computed (search index): account=%s year=%s total=%s sender=%s db=%s elapsed=%.2fs",
+                    str(account_dir.name or "").strip(),
+                    year,
+                    total,
+                    sender or "*",
+                    str(index_path.name),
+                    time.time() - t0,
+                )
+
+                return counts
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    db_paths = _iter_message_db_paths(account_dir)
+    # Default: exclude official/biz shards (biz_message*.db) to reduce noise.
+    db_paths = [p for p in db_paths if not p.name.lower().startswith("biz_message")]
+    my_wxid = str(account_dir.name or "").strip()
+    t0 = time.time()
+    total = 0
+    for db_path in db_paths:
+        total += _accumulate_db_daily_counts(
+            db_path=db_path,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            counts=counts,
+            sender_username=sender or None,
+        )
+
+    logger.info(
+        "Wrapped annual heatmap computed: account=%s year=%s total=%s sender=%s dbs=%s elapsed=%.2fs",
+        my_wxid,
+        year,
+        total,
+        sender or "*",
+        len(db_paths),
+        time.time() - t0,
+    )
+
+    return counts
 
 
 def _list_session_usernames(session_db_path: Path) -> list[str]:
@@ -769,6 +988,17 @@ def build_card_00_global_overview(
             "action": "你还在微信里发送消息",
         }
 
+    daily_counts = compute_annual_daily_counts(account_dir=account_dir, year=year, sender_username=sender)
+    annual_heatmap = {
+        "year": int(year),
+        "startDate": f"{int(year)}-01-01",
+        "endDate": f"{int(year)}-12-31",
+        "days": int(len(daily_counts)),
+        "dailyCounts": daily_counts,
+        # Product decision: keep the calendar heatmap lightweight (no extra "best day" markers).
+        "highlights": [],
+    }
+
     lines: list[str] = []
     if heatmap.total_messages > 0:
         lines.append(f"今年以来，你在微信里发送了 {heatmap.total_messages:,} 条消息，平均每天 {messages_per_day:.1f} 条。")
@@ -816,6 +1046,8 @@ def build_card_00_global_overview(
             "totalMessages": int(heatmap.total_messages),
             "activeDays": int(stats.active_days),
             "addedFriends": int(stats.added_friends),
+            "sentMediaCount": int(stats.kind_counts.get("image", 0) + stats.kind_counts.get("video", 0)),
+            "sentStickerCount": int(stats.kind_counts.get("emoji", 0)),
             "messagesPerDay": messages_per_day,
             "mostActiveHour": most_active_hour,
             "mostActiveWeekday": most_active_weekday,
@@ -823,6 +1055,7 @@ def build_card_00_global_overview(
             "topContact": top_contact_obj,
             "topGroup": top_group_obj,
             "topKind": top_kind,
+            "annualHeatmap": annual_heatmap,
             "topPhrase": {"phrase": stats.top_phrase[0], "count": int(stats.top_phrase[1])} if stats.top_phrase else None,
             "topEmoji": {"emoji": stats.top_emoji[0], "count": int(stats.top_emoji[1])} if stats.top_emoji else None,
             "highlight": highlight,
