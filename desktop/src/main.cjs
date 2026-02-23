@@ -166,7 +166,7 @@ function persistDesktopSettings() {
 
 function getCloseBehavior() {
   const v = String(loadDesktopSettings()?.closeBehavior || "").trim().toLowerCase();
-  return v === "exit" ? "exit" : "tray";
+  return v === "tray" ? "tray" : "exit" ;
 }
 
 function setCloseBehavior(next) {

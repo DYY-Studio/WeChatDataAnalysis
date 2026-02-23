@@ -144,9 +144,8 @@
           </div>
         </div>
 
-        <!-- 设置按钮（仅桌面端） -->
+        <!-- 设置按钮（仅桌面端）v-if="isDesktopEnv" -->
         <div
-          v-if="isDesktopEnv"
           class="w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
           @click="openDesktopSettings"
           title="设置"
@@ -1894,7 +1893,7 @@ const SESSION_LIST_WIDTH_KEY = 'ui.chat.session_list_width_physical'
 const SESSION_LIST_WIDTH_KEY_LEGACY = 'ui.chat.session_list_width'
 const SESSION_LIST_WIDTH_DEFAULT = 295
 const SESSION_LIST_WIDTH_MIN = 220
-const SESSION_LIST_WIDTH_MAX = 520
+const SESSION_LIST_WIDTH_MAX = 600
 
 const sessionListWidth = ref(SESSION_LIST_WIDTH_DEFAULT)
 const sessionListResizing = ref(false)

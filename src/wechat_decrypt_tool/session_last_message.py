@@ -136,14 +136,14 @@ def load_session_last_messages(account_dir: Path, usernames: list[str]) -> dict[
             chunk = uniq[i : i + chunk_size]
             placeholders = ",".join(["?"] * len(chunk))
             rows = conn.execute(
-                f"SELECT username, preview FROM {_TABLE_NAME} WHERE username IN ({placeholders})",
+                f"SELECT username, table_name FROM {_TABLE_NAME} WHERE username IN ({placeholders})",
                 chunk,
             ).fetchall()
             for r in rows:
                 u = str(r["username"] or "").strip()
                 if not u:
                     continue
-                out[u] = str(r["preview"] or "")
+                out[u] = str(r["table_name"] or "").split('_')[-1]
         return out
     except Exception:
         return {}

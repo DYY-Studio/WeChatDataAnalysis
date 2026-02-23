@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import struct
+import numpy as np
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -1524,10 +1525,10 @@ def _save_media_keys(account_dir: Path, xor_key: int, aes_key16: Optional[bytes]
     except Exception:
         pass
 
-
 def _decrypt_wechat_dat_v3(data: bytes, xor_key: int) -> bytes:
-    return bytes(b ^ xor_key for b in data)
-
+    arr = np.frombuffer(data, dtype=np.uint8)
+    result = arr ^ xor_key
+    return result.tobytes()
 
 def _decrypt_wechat_dat_v4(data: bytes, xor_key: int, aes_key: bytes) -> bytes:
     from Crypto.Cipher import AES
@@ -1546,7 +1547,7 @@ def _decrypt_wechat_dat_v4(data: bytes, xor_key: int, aes_key: bytes) -> bytes:
     if xor_size > 0:
         raw_data = rest[aes_size:-xor_size]
         xor_data = rest[-xor_size:]
-        xored_data = bytes(b ^ xor_key for b in xor_data)
+        xored_data = _decrypt_wechat_dat_v3(xor_data, xor_key)
     else:
         xored_data = b""
 

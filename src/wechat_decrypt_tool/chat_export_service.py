@@ -470,7 +470,7 @@ class ChatExportManager:
                 except Exception:
                     pass
 
-            with zipfile.ZipFile(tmp_zip, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            with zipfile.ZipFile(tmp_zip, mode="w", compresslevel=0) as zf:
                 for idx, conv_username in enumerate(target_usernames, start=1):
                     if self._should_cancel(job):
                         raise _JobCancelled()

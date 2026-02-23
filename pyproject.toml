@@ -22,6 +22,7 @@ dependencies = [
     "wx_key",
     "packaging",
     "httpx",
+    "numpy",
 ]
 
 [project.optional-dependencies]
