@@ -4,8 +4,8 @@
   "version": "1.3.0",
   "main": "src/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -s first \"cd ..\\\\frontend && npm run dev\" \"cross-env ELECTRON_START_URL=http://localhost:3000 electron .\"",
-    "dev:static": "pushd ..\\\\frontend && npm run generate && popd && cross-env ELECTRON_START_URL=http://127.0.0.1:8000 electron .",
+    "dev": "node scripts/dev.cjs",
+    "dev:static": "pushd ..\\\\frontend && npm run generate && popd && cross-env ELECTRON_START_URL=http://127.0.0.1:10392 electron .",
     "build:ui": "pushd ..\\\\frontend && npm run generate && popd && node scripts\\\\copy-ui.cjs",
     "build:backend": "uv sync --extra build && node scripts/build-backend.cjs",
     "build:icon": "node scripts/build-icon.cjs",
@@ -25,7 +25,29 @@
     },
     "files": [
       "src/**/*",
-      "package.json"
+      "package.json",
+      {
+        "from": "node_modules",
+        "to": "node_modules",
+        "filter": [
+          "electron-updater/**/*",
+          "builder-util-runtime/**/*",
+          "debug/**/*",
+          "ms/**/*",
+          "sax/**/*",
+          "js-yaml/**/*",
+          "argparse/**/*",
+          "lazy-val/**/*",
+          "lodash.escaperegexp/**/*",
+          "lodash.isequal/**/*",
+          "tiny-typed-emitter/**/*",
+          "fs-extra/**/*",
+          "graceful-fs/**/*",
+          "jsonfile/**/*",
+          "universalify/**/*",
+          "semver/**/*"
+        ]
+      }
     ],
     "extraResources": [
       {

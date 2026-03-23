@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen flex items-center justify-center relative overflow-hidden">
+  <div class="landing-page min-h-screen flex items-center justify-center relative overflow-hidden">
     <!-- 网格背景 -->
     <div class="absolute inset-0 bg-grid-pattern opacity-5"></div>
     
@@ -68,7 +68,7 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useApi } from '~/composables/useApi'
-import { DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, readLocalBoolSetting } from '~/utils/desktop-settings'
+import { DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, readLocalBoolSetting } from '~/lib/desktop-settings'
 
 onMounted(async () => {
   if (!process.client || typeof window === 'undefined') return

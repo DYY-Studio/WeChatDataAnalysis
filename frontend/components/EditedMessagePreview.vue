@@ -83,6 +83,10 @@
           [语音]
         </div>
 
+        <div v-else-if="renderType === 'location'" class="max-w-sm">
+          <ChatLocationCard :message="message" />
+        </div>
+
         <!-- 默认文本消息 -->
         <div
           v-else
@@ -101,13 +105,13 @@ const props = defineProps({
   message: { type: Object, default: null },
 })
 
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 
 const normalizeMaybeUrl = (u) => {
   const raw = String(u || '').trim()
   if (!raw) return ''
   if (/^https?:\/\//i.test(raw) || /^blob:/i.test(raw) || /^data:/i.test(raw)) return raw
-  if (/^\/api\//i.test(raw)) return `${mediaBase}${raw}`
+  if (/^\/api\//i.test(raw)) return `${apiBase}${raw.slice(4)}`
   return raw
 }
 

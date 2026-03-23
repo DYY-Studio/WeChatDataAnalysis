@@ -7,7 +7,7 @@ import sqlite3
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import HTTPException
@@ -24,6 +24,17 @@ logger = get_logger(__name__)
 
 _OUTPUT_DATABASES_DIR = get_output_databases_dir()
 _DEBUG_SESSIONS = os.environ.get("WECHAT_TOOL_DEBUG_SESSIONS", "0") == "1"
+_SQLITE_HEADER = b"SQLite format 3\x00"
+
+
+def _is_valid_decrypted_sqlite(path: Path) -> bool:
+    try:
+        if not path.exists() or (not path.is_file()):
+            return False
+        with path.open("rb") as f:
+            return f.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except Exception:
+        return False
 
 
 def _list_decrypted_accounts() -> list[str]:
@@ -34,7 +45,7 @@ def _list_decrypted_accounts() -> list[str]:
     for p in _OUTPUT_DATABASES_DIR.iterdir():
         if not p.is_dir():
             continue
-        if (p / "session.db").exists() and (p / "contact.db").exists():
+        if _is_valid_decrypted_sqlite(p / "session.db") and _is_valid_decrypted_sqlite(p / "contact.db"):
             accounts.append(p.name)
 
     accounts.sort()
@@ -49,7 +60,9 @@ def _resolve_account_dir(account: Optional[str]) -> Path:
             detail="No decrypted databases found. Please decrypt first.",
         )
 
-    selected = account or accounts[0]
+    selected = str(account or "").strip() or accounts[0]
+    if selected not in accounts:
+        raise HTTPException(status_code=404, detail="Account not found.")
     base = _OUTPUT_DATABASES_DIR.resolve()
     candidate = (_OUTPUT_DATABASES_DIR / selected).resolve()
 
@@ -712,7 +725,174 @@ def _extract_xml_tag_or_attr(xml_text: str, name: str) -> str:
     return _extract_xml_attr(xml_text, name)
 
 
-def _parse_system_message_content(raw_text: str) -> str:
+def _parse_location_message(text: str) -> dict[str, Any]:
+    raw = html.unescape(str(text or "").strip())
+
+    def _clean(value: Any) -> str:
+        candidate = _strip_cdata(str(value or "").strip())
+        if not candidate:
+            return ""
+        candidate = html.unescape(candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        return candidate
+
+    def _to_float(value: Any) -> Optional[float]:
+        s = str(value or "").strip()
+        if not s:
+            return None
+        try:
+            num = float(s)
+        except Exception:
+            return None
+        if not (-180.0 <= num <= 180.0):
+            return None
+        return num
+
+    poiname = _clean(
+        _extract_xml_tag_or_attr(raw, "poiname")
+        or _extract_xml_tag_or_attr(raw, "poiName")
+        or _extract_xml_tag_or_attr(raw, "name")
+    )
+    label = _clean(
+        _extract_xml_tag_or_attr(raw, "label")
+        or _extract_xml_tag_or_attr(raw, "labelname")
+        or _extract_xml_tag_or_attr(raw, "address")
+    )
+
+    lat = _to_float(
+        _extract_xml_tag_or_attr(raw, "x")
+        or _extract_xml_tag_or_attr(raw, "latitude")
+        or _extract_xml_tag_or_attr(raw, "lat")
+    )
+    lng = _to_float(
+        _extract_xml_tag_or_attr(raw, "y")
+        or _extract_xml_tag_or_attr(raw, "longitude")
+        or _extract_xml_tag_or_attr(raw, "lng")
+        or _extract_xml_tag_or_attr(raw, "lon")
+    )
+
+    if lat is not None and not (-90.0 <= lat <= 90.0):
+        lat = None
+    if lng is not None and not (-180.0 <= lng <= 180.0):
+        lng = None
+
+    title = poiname or label or "位置"
+    return {
+        "renderType": "location",
+        "content": title or "[Location]",
+        "locationLat": lat,
+        "locationLng": lng,
+        "locationPoiname": poiname,
+        "locationLabel": label,
+    }
+
+
+def _extract_chatroom_top_message_metadata(raw_text: str) -> dict[str, str]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+
+    lower_text = text.lower()
+    if "<mmchatroomtopmsg" in lower_text or "<sysmsg" in lower_text:
+        chatroom_id = str(_extract_xml_tag_text(text, "chatroomname") or "").strip()
+        operation = str(_extract_xml_tag_text(text, "op") or "").strip()
+        operator_username = str(_extract_xml_tag_text(text, "username") or "").strip()
+        operator_display_name = str(_extract_xml_tag_text(text, "nickname") or "").strip()
+        if chatroom_id.endswith("@chatroom") and operation in {"1", "2"} and operator_username:
+            return {
+                "operation": operation,
+                "operatorUsername": operator_username,
+                "operatorDisplayName": operator_display_name,
+            }
+
+    def _is_int_token(value: str) -> bool:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return False
+        if candidate[0] in {"+", "-"}:
+            candidate = candidate[1:]
+        return candidate.isdigit()
+
+    normalized = re.sub(r"<!--\s*ChatRoomTopMsgRequest\s*-->", " ", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"<!--\s*ChatRoomTopMsgResponse\s*-->", " ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return {}
+
+    parts = normalized.split(" ")
+    has_markers = ("chatroomtopmsgrequest" in lower_text) or ("chatroomtopmsgresponse" in lower_text)
+    if len(parts) < 5:
+        return {}
+
+    chatroom_id = str(parts[0] or "").strip()
+    operation = str(parts[1] or "").strip()
+    if not chatroom_id.endswith("@chatroom"):
+        return {}
+    if operation not in {"1", "2"}:
+        return {}
+
+    if not has_markers:
+        if len(parts) < 6:
+            return {}
+        if not _is_int_token(parts[2]) or not _is_int_token(parts[3]) or not _is_int_token(parts[5]):
+            return {}
+
+    operator_username = str(parts[4] or "").strip()
+    if not operator_username:
+        return {}
+
+    operator_display_name = ""
+    if len(parts) >= 6 and _is_int_token(parts[5]):
+        response_tokens = parts[6:]
+        if len(response_tokens) >= 2 and _is_int_token(response_tokens[-1]):
+            response_tokens = response_tokens[:-1]
+        operator_display_name = " ".join(response_tokens).strip()
+
+    return {
+        "operation": operation,
+        "operatorUsername": operator_username,
+        "operatorDisplayName": operator_display_name,
+    }
+
+
+def _parse_chatroom_top_message(
+    raw_text: str,
+    resolve_display_name: Optional[Callable[[str, str], str]] = None,
+) -> str:
+    meta = _extract_chatroom_top_message_metadata(raw_text)
+    if not meta:
+        return ""
+
+    operation = str(meta.get("operation") or "").strip()
+    operator_username = str(meta.get("operatorUsername") or "").strip()
+    operator_display_name = str(meta.get("operatorDisplayName") or "").strip()
+
+    if resolve_display_name is not None and operator_username:
+        try:
+            resolved = str(resolve_display_name(operator_username, operator_display_name) or "").strip()
+        except Exception:
+            resolved = ""
+        if resolved:
+            operator_display_name = resolved
+
+    if not operator_display_name:
+        operator_display_name = operator_username or "有人"
+
+    action_map = {
+        "1": "置顶了一条消息",
+        "2": "移除了一条置顶消息",
+    }
+    action = action_map.get(operation)
+    if not action:
+        return ""
+
+    return f"{operator_display_name}{action}"
+
+
+def _parse_system_message_content(
+    raw_text: str,
+    resolve_display_name: Optional[Callable[[str, str], str]] = None,
+) -> str:
     text = str(raw_text or "").strip()
     if not text:
         return "[系统消息]"
@@ -726,11 +906,16 @@ def _parse_system_message_content(raw_text: str) -> str:
         if nested_content:
             candidate = nested_content
 
+        candidate = re.sub(r"<!--.*?-->", " ", candidate, flags=re.IGNORECASE | re.DOTALL)
         candidate = re.sub(r"<!\[CDATA\[", "", candidate, flags=re.IGNORECASE)
         candidate = re.sub(r"\]\]>", "", candidate)
         candidate = re.sub(r"</?[_a-zA-Z0-9]+[^>]*>", "", candidate)
         candidate = re.sub(r"\s+", " ", candidate).strip()
         return candidate
+
+    top_message_text = _parse_chatroom_top_message(text, resolve_display_name=resolve_display_name)
+    if top_message_text:
+        return top_message_text
 
     if "revokemsg" in text.lower():
         replace_msg = _extract_xml_tag_text(text, "replacemsg")
@@ -941,11 +1126,40 @@ def _parse_quote_message(text: str) -> str:
 
 
 def _parse_app_message(text: str) -> dict[str, Any]:
-    app_type_raw = _extract_xml_tag_text(text, "type")
-    try:
-        app_type = int(str(app_type_raw or "0").strip() or "0")
-    except Exception:
-        app_type = 0
+    def _extract_appmsg_type(xml_text: str) -> int:
+        """提取 <appmsg> 直系子节点的 <type>，避免被 refermsg/recorditem/weappinfo 等嵌套块里的 <type> 干扰。"""
+
+        probe = str(xml_text or "")
+        try:
+            m = re.search(r"<appmsg\b[^>]*>(.*?)</appmsg>", probe, flags=re.IGNORECASE | re.DOTALL)
+        except Exception:
+            m = None
+
+        if m:
+            inner = str(m.group(1) or "")
+            # 一些嵌套块内部也会出现 <type>，先剔除再提取。
+            try:
+                inner = re.sub(r"(<refermsg\b[^>]*>.*?</refermsg>)", "", inner, flags=re.IGNORECASE | re.DOTALL)
+                inner = re.sub(r"(<patmsg\b[^>]*>.*?</patmsg>)", "", inner, flags=re.IGNORECASE | re.DOTALL)
+                inner = re.sub(r"(<recorditem\b[^>]*>.*?</recorditem>)", "", inner, flags=re.IGNORECASE | re.DOTALL)
+                inner = re.sub(r"(<weappinfo\b[^>]*>.*?</weappinfo>)", "", inner, flags=re.IGNORECASE | re.DOTALL)
+                inner = re.sub(r"(<wxaappinfo\b[^>]*>.*?</wxaappinfo>)", "", inner, flags=re.IGNORECASE | re.DOTALL)
+            except Exception:
+                pass
+
+            t = _extract_xml_tag_text(inner, "type")
+            try:
+                return int(str(t or "0").strip() or "0")
+            except Exception:
+                return 0
+
+        t = _extract_xml_tag_text(probe, "type")
+        try:
+            return int(str(t or "0").strip() or "0")
+        except Exception:
+            return 0
+
+    app_type = _extract_appmsg_type(text)
     title = _extract_xml_tag_text(text, "title")
     des = _extract_xml_tag_text(text, "des")
     url = _normalize_xml_url(_extract_xml_tag_text(text, "url"))
@@ -1004,6 +1218,49 @@ def _parse_app_message(text: str) -> dict[str, Any]:
             "fromUsername": str(source_username or "").strip(),
             "linkType": link_type,
             "linkStyle": link_style,
+        }
+
+    if app_type in (33, 36):
+        # 小程序分享（WeChat v4 常见：local_type = 49 + (33<<32) / 49 + (36<<32)）
+        # 注：部分 payload 的 <url> 为空；前端会按需渲染为不可点击卡片。
+        weapp_block = _extract_xml_tag_text(text, "weappinfo") or _extract_xml_tag_text(text, "wxaappinfo")
+        weapp_username = _extract_xml_tag_text(weapp_block, "username") if weapp_block else ""
+        weapp_icon = _normalize_xml_url(
+            _extract_xml_tag_or_attr(weapp_block, "weappiconurl") if weapp_block else ""
+        ) or _normalize_xml_url(_extract_xml_tag_or_attr(text, "weappiconurl"))
+
+        thumb_url = _normalize_xml_url(
+            _extract_xml_tag_or_attr(text, "thumburl")
+            or _extract_xml_tag_or_attr(text, "cdnthumburl")
+            or _extract_xml_tag_or_attr(text, "coverurl")
+            or _extract_xml_tag_or_attr(text, "cover")
+            or weapp_icon
+        )
+
+        from_display = str(source_display_name or "").strip()
+        if not from_display and weapp_block:
+            from_display = (
+                _extract_xml_tag_text(weapp_block, "nickname")
+                or _extract_xml_tag_text(weapp_block, "appname")
+                or ""
+            )
+        if not from_display:
+            from_display = str(_extract_xml_tag_text(text, "sourcename") or "").strip()
+
+        from_u = str(weapp_username or source_username or "").strip()
+
+        content_text = (des or title or "[Mini Program]").strip() or "[Mini Program]"
+        title_text = (title or des or "").strip()
+        return {
+            "renderType": "link",
+            "content": content_text,
+            "title": title_text or content_text,
+            "url": url or "",
+            "thumbUrl": thumb_url or "",
+            "from": from_display,
+            "fromUsername": from_u,
+            "linkType": "mini_program",
+            "linkStyle": "default",
         }
 
     if app_type in (6, 74):
@@ -1303,6 +1560,14 @@ def _build_latest_message_preview(
         content_text = "[视频]"
     elif local_type == 47:
         content_text = "[动画表情]"
+    elif local_type == 48:
+        parsed = _parse_location_message(raw_text)
+        location_name = (
+            str(parsed.get("locationPoiname") or "").strip()
+            or str(parsed.get("locationLabel") or "").strip()
+            or str(parsed.get("content") or "").strip()
+        )
+        content_text = f"[位置]{location_name}" if location_name else "[位置]"
     else:
         if raw_text and (not raw_text.startswith("<")) and (not raw_text.startswith('"<')):
             content_text = raw_text
@@ -1347,6 +1612,7 @@ def _normalize_session_preview_text(
         return ""
 
     text = text.replace("[表情]", "[动画表情]")
+    text = re.sub(r"\[location\]", "[位置]", text, flags=re.IGNORECASE)
     if (not is_group) or text.startswith("[草稿]"):
         return text
 
@@ -2021,6 +2287,10 @@ def _row_to_search_hit(
     pay_sub_type = ""
     transfer_status = ""
     voip_type = ""
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    location_poiname = ""
+    location_label = ""
 
     if local_type == 10000:
         render_type = "system"
@@ -2075,6 +2345,14 @@ def _row_to_search_hit(
     elif local_type == 47:
         render_type = "emoji"
         content_text = "[表情]"
+    elif local_type == 48:
+        parsed = _parse_location_message(raw_text)
+        render_type = str(parsed.get("renderType") or "location")
+        content_text = str(parsed.get("content") or "[Location]")
+        location_lat = parsed.get("locationLat")
+        location_lng = parsed.get("locationLng")
+        location_poiname = str(parsed.get("locationPoiname") or "")
+        location_label = str(parsed.get("locationLabel") or "")
     elif local_type == 50:
         render_type = "voip"
         try:
@@ -2162,4 +2440,9 @@ def _row_to_search_hit(
         "paySubType": pay_sub_type,
         "transferStatus": transfer_status,
         "voipType": voip_type,
+        "locationLat": location_lat,
+        "locationLng": location_lng,
+        "locationPoiname": location_poiname,
+        "locationLabel": location_label,
+        "_rawText": raw_text if local_type in (10000, 266287972401) else "",
     }

@@ -7,24 +7,31 @@ const {
   globalShortcut,
   dialog,
   shell,
+  session,
 } = require("electron");
-const { autoUpdater } = require("electron-updater");
+let autoUpdater = null;
+let autoUpdaterLoadError = null;
+try {
+  ({ autoUpdater } = require("electron-updater"));
+} catch (err) {
+  autoUpdaterLoadError = err;
+}
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const http = require("http");
+const net = require("net");
 const path = require("path");
 
-const BACKEND_HOST = process.env.WECHAT_TOOL_HOST || "127.0.0.1";
-const BACKEND_PORT = Number(process.env.WECHAT_TOOL_PORT || "8000");
-const BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/api/health`;
+const DEFAULT_BACKEND_HOST = String(process.env.WECHAT_TOOL_HOST || "127.0.0.1").trim() || "127.0.0.1";
+const DEFAULT_BACKEND_PORT = parsePort(process.env.WECHAT_TOOL_PORT) ?? 10392;
 
 let backendProc = null;
-let backendStdioStream = null;
 let resolvedDataDir = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let desktopSettings = null;
+let backendPortChangeInProgress = false;
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -44,6 +51,144 @@ if (!gotSingleInstanceLock) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parsePort(value) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return null;
+  if (n < 1 || n > 65535) return null;
+  return n;
+}
+
+function formatHostForUrl(host) {
+  const h = String(host || "").trim();
+  if (!h) return "127.0.0.1";
+  // IPv6 literals must be wrapped in brackets in URLs.
+  if (h.includes(":") && !(h.startsWith("[") && h.endsWith("]"))) return `[${h}]`;
+  return h;
+}
+
+function getBackendBindHost() {
+  return DEFAULT_BACKEND_HOST;
+}
+
+function getBackendAccessHost() {
+  // 0.0.0.0 / :: are fine bind hosts, but not a reachable client destination.
+  const host = String(getBackendBindHost() || "").trim();
+  if (host === "0.0.0.0" || host === "::") return "127.0.0.1";
+  return host || "127.0.0.1";
+}
+
+function getBackendPort() {
+  const envPort = parsePort(process.env.WECHAT_TOOL_PORT);
+  if (envPort != null) return envPort;
+  // In dev we intentionally ignore persisted packaged-app settings so the
+  // launcher can keep Electron, Nuxt devProxy and the backend child aligned.
+  if (!app.isPackaged) return DEFAULT_BACKEND_PORT;
+  const settingsPort = parsePort(loadDesktopSettings()?.backendPort);
+  return settingsPort ?? DEFAULT_BACKEND_PORT;
+}
+
+function setBackendPortSetting(nextPort) {
+  const p = parsePort(nextPort);
+  if (p == null) throw new Error("端口无效，请输入 1-65535 的整数");
+  loadDesktopSettings();
+  desktopSettings.backendPort = p;
+  persistDesktopSettings();
+  process.env.WECHAT_TOOL_PORT = String(p);
+  return p;
+}
+
+function getBackendHealthUrl() {
+  const host = formatHostForUrl(getBackendAccessHost());
+  const port = getBackendPort();
+  return `http://${host}:${port}/api/health`;
+}
+
+function getBackendUiUrl() {
+  const host = formatHostForUrl(getBackendAccessHost());
+  const port = getBackendPort();
+  return `http://${host}:${port}/`;
+}
+
+function isPortAvailable(port, host) {
+  return new Promise((resolve) => {
+    try {
+      const srv = net.createServer();
+      srv.unref();
+      srv.once("error", () => resolve(false));
+      srv.listen({ port, host }, () => {
+        srv.close(() => resolve(true));
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function getEphemeralPort(host) {
+  return new Promise((resolve) => {
+    try {
+      const srv = net.createServer();
+      srv.unref();
+      srv.once("error", () => resolve(null));
+      srv.listen({ port: 0, host }, () => {
+        const addr = srv.address();
+        const p = addr && typeof addr === "object" ? Number(addr.port) : null;
+        srv.close(() => resolve(Number.isInteger(p) ? p : null));
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function chooseAvailablePort(preferredPort, host) {
+  const preferred = parsePort(preferredPort);
+  if (preferred != null && (await isPortAvailable(preferred, host))) return preferred;
+
+  // Keep the port close to the user's expectation when possible.
+  if (preferred != null) {
+    for (let i = 1; i <= 50; i += 1) {
+      const cand = preferred + i;
+      if (cand > 65535) break;
+      if (await isPortAvailable(cand, host)) return cand;
+    }
+  }
+
+  // Fall back to an OS-chosen ephemeral port.
+  const random = await getEphemeralPort(host);
+  if (random != null && (await isPortAvailable(random, host))) return random;
+
+  return null;
+}
+
+async function ensureBackendPortAvailableOnStartup() {
+  // Avoid surprising behavior in dev: the frontend dev server expects a stable backend port.
+  if (!app.isPackaged) return getBackendPort();
+
+  const bindHost = getBackendBindHost();
+  const currentPort = getBackendPort();
+  const ok = await isPortAvailable(currentPort, bindHost);
+  if (ok) return currentPort;
+
+  const chosen = await chooseAvailablePort(currentPort, bindHost);
+  if (chosen == null) {
+    logMain(`[main] backend port unavailable: ${currentPort} host=${bindHost}; failed to find a free port`);
+    return currentPort;
+  }
+
+  try {
+    setBackendPortSetting(chosen);
+    logMain(`[main] backend port ${currentPort} unavailable; switched to ${chosen}`);
+  } catch (err) {
+    logMain(`[main] failed to persist backend port ${chosen}: ${err?.message || err}`);
+  }
+
+  return getBackendPort();
 }
 
 function resolveDataDir() {
@@ -76,6 +221,161 @@ function getUserDataDir() {
   return resolveDataDir();
 }
 
+function sanitizeAccountName(account) {
+  const name = String(account || "").trim();
+  if (!name) throw new Error("缺少账号参数");
+  if (name === "." || name === "..") throw new Error("账号参数非法");
+  if (name.includes("/") || name.includes("\\")) throw new Error("账号参数非法");
+  return name;
+}
+
+function listDecryptedAccountsOnDisk(databasesDir) {
+  try {
+    if (!fs.existsSync(databasesDir)) return [];
+  } catch {
+    return [];
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(databasesDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const accounts = [];
+  for (const entry of entries) {
+    try {
+      if (!entry || !entry.isDirectory()) continue;
+      const accountDir = path.join(databasesDir, entry.name);
+      const hasSession = fs.existsSync(path.join(accountDir, "session.db"));
+      const hasContact = fs.existsSync(path.join(accountDir, "contact.db"));
+      if (hasSession && hasContact) accounts.push(String(entry.name || ""));
+    } catch {}
+  }
+  accounts.sort((a, b) => a.localeCompare(b));
+  return accounts;
+}
+
+function resolveAccountDirInOutput(account) {
+  const dataDir = resolveDataDir();
+  if (!dataDir) throw new Error("无法定位数据目录");
+
+  const outputDir = path.join(dataDir, "output");
+  const databasesDir = path.join(outputDir, "databases");
+  const accountName = sanitizeAccountName(account);
+
+  const base = path.resolve(databasesDir);
+  const accountDir = path.resolve(path.join(databasesDir, accountName));
+  if (accountDir !== base && !accountDir.startsWith(base + path.sep)) {
+    throw new Error("账号路径非法");
+  }
+
+  return {
+    dataDir,
+    outputDir,
+    databasesDir,
+    accountName,
+    accountDir,
+  };
+}
+
+function getAccountInfoFromDisk(account) {
+  const { accountName, accountDir } = resolveAccountDirInOutput(account);
+  if (!fs.existsSync(accountDir) || !fs.statSync(accountDir).isDirectory()) {
+    throw new Error("账号数据不存在");
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(accountDir, { withFileTypes: true });
+  } catch {}
+  const dbFiles = entries
+    .filter((e) => !!e && e.isFile() && String(e.name || "").toLowerCase().endsWith(".db"))
+    .map((e) => String(e.name || ""))
+    .sort((a, b) => a.localeCompare(b));
+
+  let sessionUpdatedAt = 0;
+  try {
+    const st = fs.statSync(path.join(accountDir, "session.db"));
+    sessionUpdatedAt = Math.floor(Number(st?.mtimeMs || 0) / 1000);
+  } catch {}
+
+  return {
+    status: "success",
+    account: accountName,
+    path: accountDir,
+    database_count: dbFiles.length,
+    databases: dbFiles,
+    session_updated_at: sessionUpdatedAt,
+  };
+}
+
+function removeAccountFromKeyStore(dataDir, accountName) {
+  const keyStorePath = path.join(dataDir, "output", "account_keys.json");
+  try {
+    if (!fs.existsSync(keyStorePath)) return false;
+    const raw = fs.readFileSync(keyStorePath, { encoding: "utf8" });
+    const parsed = JSON.parse(raw || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    if (!Object.prototype.hasOwnProperty.call(parsed, accountName)) return false;
+    delete parsed[accountName];
+    fs.writeFileSync(keyStorePath, JSON.stringify(parsed, null, 2), { encoding: "utf8" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteAccountDataFromDisk(account) {
+  const { dataDir, outputDir, databasesDir, accountName, accountDir } = resolveAccountDirInOutput(account);
+  if (!fs.existsSync(accountDir) || !fs.statSync(accountDir).isDirectory()) {
+    throw new Error("账号数据不存在");
+  }
+
+  const wasBackendRunning = !!backendProc;
+  let restartError = null;
+  let result = null;
+
+  if (wasBackendRunning) {
+    await stopBackendAndWait({ timeoutMs: 10_000 });
+  }
+
+  try {
+    const exportsDir = path.join(outputDir, "exports", accountName);
+    try {
+      fs.rmSync(exportsDir, { recursive: true, force: true });
+    } catch {}
+
+    fs.rmSync(accountDir, { recursive: true, force: true });
+    const removedKeyCache = removeAccountFromKeyStore(dataDir, accountName);
+    const accounts = listDecryptedAccountsOnDisk(databasesDir);
+    result = {
+      status: "success",
+      deleted_account: accountName,
+      accounts,
+      default_account: accounts.length ? accounts[0] : null,
+      removed_key_cache: removedKeyCache,
+    };
+  } finally {
+    if (wasBackendRunning) {
+      try {
+        startBackend();
+        await waitForBackend({ timeoutMs: 30_000 });
+      } catch (err) {
+        restartError = err;
+        logMain(`[main] failed to restart backend after deleteAccountData: ${err?.message || err}`);
+      }
+    }
+  }
+
+  if (restartError) {
+    throw new Error(`删除完成，但后端重启失败：${restartError?.message || restartError}`);
+  }
+  if (!result) throw new Error("删除账号数据失败");
+  return result;
+}
+
 function getExeDir() {
   try {
     return path.dirname(process.execPath);
@@ -86,7 +386,11 @@ function getExeDir() {
 
 function ensureOutputLink() {
   // Users often expect an `output/` folder near the installed exe. We keep the real data
-  // in the per-user data dir, and (when possible) create a Windows junction next to the exe.
+  // in the per-user data dir.
+  //
+  // NOTE: We intentionally avoid creating a junction/symlink inside the install directory.
+  // Some uninstall/update flows may traverse reparse points and delete the target directory,
+  // causing data loss (the install dir is removed on every update/reinstall).
   if (!app.isPackaged) return;
 
   const exeDir = getExeDir();
@@ -94,26 +398,56 @@ function ensureOutputLink() {
   if (!exeDir || !dataDir) return;
 
   const target = path.join(dataDir, "output");
-  const linkPath = path.join(exeDir, "output");
+  const legacyLinkPath = path.join(exeDir, "output");
 
-  // If the target doesn't exist yet, create it so the link points somewhere real.
+  // Ensure the real output dir exists.
   try {
     fs.mkdirSync(target, { recursive: true });
   } catch {}
 
-  // If something already exists at linkPath, do not overwrite it.
+  // Best-effort: remove a legacy junction/symlink at `exeDir/output` so uninstallers can't
+  // accidentally traverse it and delete the real per-user output directory.
   try {
-    if (fs.existsSync(linkPath)) return;
+    const st = fs.lstatSync(legacyLinkPath);
+    if (st.isSymbolicLink()) {
+      try {
+        fs.unlinkSync(legacyLinkPath);
+        logMain(`[main] removed legacy output link: ${legacyLinkPath}`);
+      } catch (err) {
+        logMain(`[main] failed to remove legacy output link: ${err?.message || err}`);
+      }
+    } else if (st.isDirectory()) {
+      const entries = fs.readdirSync(legacyLinkPath);
+      if (Array.isArray(entries) && entries.length === 0) {
+        // Remove an empty real directory to reduce confusion (it will be recreated by the backend if needed).
+        fs.rmdirSync(legacyLinkPath);
+      } else {
+        // Do not overwrite non-empty directories to avoid data loss.
+        // Note: data stored here will be wiped on update/reinstall.
+        logMain(
+          `[main] output dir exists in install dir (not a link): ${legacyLinkPath}. real data dir output: ${target}`
+        );
+      }
+    } else {
+      logMain(`[main] output path exists and is not a directory/link: ${legacyLinkPath}`);
+    }
   } catch {
-    return;
+    // Doesn't exist yet.
   }
 
+  // Best-effort: drop a helper file next to the exe so users can find the real data.
+  // This avoids the data-loss risks of using junctions/symlinks under the install directory.
   try {
-    fs.symlinkSync(target, linkPath, "junction");
-    logMain(`[main] created output link: ${linkPath} -> ${target}`);
-  } catch (err) {
-    logMain(`[main] failed to create output link: ${err?.message || err}`);
-  }
+    const p = path.join(exeDir, "output-location.txt");
+    const text = `WeChatDataAnalysis data directory\n\nOutput folder:\n${target}\n`;
+    fs.writeFileSync(p, text, { encoding: "utf8" });
+  } catch {}
+
+  try {
+    const p = path.join(exeDir, "open-output.cmd");
+    const text = `@echo off\r\nexplorer \"${target}\"\r\n`;
+    fs.writeFileSync(p, text, { encoding: "utf8" });
+  } catch {}
 }
 
 function getMainLogPath() {
@@ -137,6 +471,34 @@ function getDesktopSettingsPath() {
   return path.join(dir, "desktop-settings.json");
 }
 
+function getPackagedUiDir() {
+  if (!app.isPackaged) return null;
+  try {
+    return path.join(process.resourcesPath, "ui");
+  } catch {
+    return null;
+  }
+}
+
+function readPackagedUiBuildId() {
+  const uiDir = getPackagedUiDir();
+  if (!uiDir) return "";
+
+  try {
+    const indexPath = path.join(uiDir, "index.html");
+    if (!fs.existsSync(indexPath)) return "";
+    const html = fs.readFileSync(indexPath, { encoding: "utf8" });
+    const match =
+      html.match(/buildId:"([^"]+)"/) ||
+      html.match(/\/_payload\.json\?([^"'&<>\s]+)/) ||
+      html.match(/data-src="\/_payload\.json\?([^"]+)"/);
+    return String(match?.[1] || "").trim();
+  } catch (err) {
+    logMain(`[main] failed to read packaged UI build id: ${err?.message || err}`);
+    return "";
+  }
+}
+
 function loadDesktopSettings() {
   if (desktopSettings) return desktopSettings;
 
@@ -146,6 +508,11 @@ function loadDesktopSettings() {
     closeBehavior: "tray",
     // When set, suppress the auto-update prompt for this exact version.
     ignoredUpdateVersion: "",
+    // Backend (FastAPI) listens on this port. Used in packaged builds.
+    backendPort: DEFAULT_BACKEND_PORT,
+    // Tracks the packaged UI build so we can invalidate Chromium's HTTP cache
+    // after upgrades without wiping user data/localStorage.
+    lastSeenUiBuildId: "",
   };
 
   const p = getDesktopSettingsPath();
@@ -162,6 +529,7 @@ function loadDesktopSettings() {
     const raw = fs.readFileSync(p, { encoding: "utf8" });
     const parsed = JSON.parse(raw || "{}");
     desktopSettings = { ...defaults, ...(parsed && typeof parsed === "object" ? parsed : {}) };
+    desktopSettings.backendPort = parsePort(desktopSettings.backendPort) ?? defaults.backendPort;
   } catch (err) {
     desktopSettings = { ...defaults };
     logMain(`[main] failed to load settings: ${err?.message || err}`);
@@ -208,6 +576,33 @@ function setIgnoredUpdateVersion(version) {
   return desktopSettings.ignoredUpdateVersion;
 }
 
+async function refreshRendererCacheForPackagedUi() {
+  if (!app.isPackaged) return;
+
+  const nextBuildId = readPackagedUiBuildId();
+  if (!nextBuildId) return;
+
+  const prevBuildId = String(loadDesktopSettings()?.lastSeenUiBuildId || "").trim();
+  if (prevBuildId === nextBuildId) return;
+
+  try {
+    const ses = session?.defaultSession;
+    if (ses) {
+      await ses.clearCache();
+      try {
+        await ses.clearStorageData({ storages: ["serviceworkers"] });
+      } catch {}
+    }
+    logMain(`[main] cleared renderer cache for UI build change: ${prevBuildId || "(none)"} -> ${nextBuildId}`);
+  } catch (err) {
+    logMain(`[main] failed to clear renderer cache for UI build change: ${err?.message || err}`);
+  }
+
+  loadDesktopSettings();
+  desktopSettings.lastSeenUiBuildId = nextBuildId;
+  persistDesktopSettings();
+}
+
 function parseEnvBool(value) {
   if (value == null) return null;
   const v = String(value).trim().toLowerCase();
@@ -223,6 +618,12 @@ function isAutoUpdateEnabled() {
 
   const forced = parseEnvBool(process.env.AUTO_UPDATE_ENABLED);
   let enabled = forced != null ? forced : !!app.isPackaged;
+  if (enabled && !autoUpdater) {
+    enabled = false;
+    logMain(
+      `[main] auto-update disabled: electron-updater unavailable: ${autoUpdaterLoadError?.message || "unknown error"}`
+    );
+  }
 
   // In packaged builds electron-updater reads update config from app-update.yml.
   // If missing, treat auto-update as disabled to avoid noisy errors.
@@ -710,20 +1111,20 @@ function attachBackendStdio(proc, logPath) {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
   } catch {}
 
+  let stream = null;
   try {
-    backendStdioStream = fs.createWriteStream(logPath, { flags: "a" });
-    backendStdioStream.write(`[${nowIso()}] [main] backend stdio -> ${logPath}\n`);
+    stream = fs.createWriteStream(logPath, { flags: "a" });
+    stream.write(`[${nowIso()}] [main] backend stdio -> ${logPath}\n`);
   } catch {
-    backendStdioStream = null;
     return;
   }
 
   const write = (prefix, chunk) => {
-    if (!backendStdioStream) return;
+    if (!stream) return;
     try {
       const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      backendStdioStream.write(`[${nowIso()}] ${prefix} ${text}`);
-      if (!text.endsWith("\n")) backendStdioStream.write("\n");
+      stream.write(`[${nowIso()}] ${prefix} ${text}`);
+      if (!text.endsWith("\n")) stream.write("\n");
     } catch {}
   };
 
@@ -733,9 +1134,9 @@ function attachBackendStdio(proc, logPath) {
   proc.on("close", (code, signal) => {
     write("[backend:close]", `code=${code} signal=${signal}`);
     try {
-      backendStdioStream?.end();
+      stream?.end();
     } catch {}
-    backendStdioStream = null;
+    stream = null;
   });
 }
 
@@ -749,13 +1150,17 @@ function getPackagedBackendPath() {
   return path.join(process.resourcesPath, "backend", "wechat-backend.exe");
 }
 
+function getPackagedWcdbDllPath() {
+  return path.join(process.resourcesPath, "backend", "native", "wcdb_api.dll");
+}
+
 function startBackend() {
   if (backendProc) return backendProc;
 
   const env = {
     ...process.env,
-    WECHAT_TOOL_HOST: BACKEND_HOST,
-    WECHAT_TOOL_PORT: String(BACKEND_PORT),
+    WECHAT_TOOL_HOST: getBackendBindHost(),
+    WECHAT_TOOL_PORT: String(getBackendPort()),
     // Make sure Python prints UTF-8 to stdout/stderr.
     PYTHONIOENCODING: process.env.PYTHONIOENCODING || "utf-8",
   };
@@ -779,8 +1184,17 @@ function startBackend() {
         `Packaged backend not found: ${backendExe}. Build it into desktop/resources/backend/wechat-backend.exe`
       );
     }
+    const packagedWcdbDll = getPackagedWcdbDllPath();
+    if (fs.existsSync(packagedWcdbDll)) {
+      env.WECHAT_TOOL_WCDB_API_DLL_PATH = packagedWcdbDll;
+      logMain(`[main] using packaged wcdb_api.dll: ${packagedWcdbDll}`);
+    } else {
+      logMain(`[main] packaged wcdb_api.dll not found: ${packagedWcdbDll}`);
+    }
+
+    const backendCwd = path.dirname(backendExe);
     backendProc = spawn(backendExe, [], {
-      cwd: env.WECHAT_TOOL_DATA_DIR,
+      cwd: backendCwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -795,8 +1209,9 @@ function startBackend() {
     });
   }
 
-  backendProc.on("exit", (code, signal) => {
-    backendProc = null;
+  const proc = backendProc;
+  proc.on("exit", (code, signal) => {
+    if (backendProc === proc) backendProc = null;
     // eslint-disable-next-line no-console
     console.log(`[backend] exited code=${code} signal=${signal}`);
     logMain(`[backend] exited code=${code} signal=${signal}`);
@@ -835,6 +1250,42 @@ function stopBackend() {
   } catch {}
 }
 
+async function stopBackendAndWait({ timeoutMs = 10_000 } = {}) {
+  if (!backendProc) return;
+  const proc = backendProc;
+
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+
+    const timer = setTimeout(finish, timeoutMs);
+
+    try {
+      proc.once("exit", () => {
+        clearTimeout(timer);
+        finish();
+      });
+    } catch {}
+
+    try {
+      stopBackend();
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
+}
+
+async function restartBackend({ timeoutMs = 30_000 } = {}) {
+  await stopBackendAndWait({ timeoutMs: 10_000 });
+  startBackend();
+  await waitForBackend({ timeoutMs });
+}
+
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const req = http.get(url, (res) => {
@@ -849,17 +1300,28 @@ function httpGet(url) {
   });
 }
 
-async function waitForBackend({ timeoutMs }) {
+async function waitForBackend({ timeoutMs, healthUrl } = {}) {
+  const url = String(healthUrl || getBackendHealthUrl()).trim();
   const startedAt = Date.now();
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // If the backend process died, fail fast (otherwise we'd wait for the full timeout).
+    if (!backendProc) {
+      throw new Error(`Backend process exited before becoming ready: ${url}`);
+    }
+    if (backendProc.exitCode != null) {
+      throw new Error(
+        `Backend process exited (code=${backendProc.exitCode} signal=${backendProc.signalCode || "null"}): ${url}`
+      );
+    }
+
     try {
-      const code = await httpGet(BACKEND_HEALTH_URL);
+      const code = await httpGet(url);
       if (code >= 200 && code < 500) return;
     } catch {}
 
     if (Date.now() - startedAt > timeoutMs) {
-      throw new Error(`Backend did not become ready in ${timeoutMs}ms: ${BACKEND_HEALTH_URL}`);
+      throw new Error(`Backend did not become ready in ${timeoutMs}ms: ${url}`);
     }
 
     await new Promise((r) => setTimeout(r, 300));
@@ -897,6 +1359,34 @@ function getRendererConsoleLogPath() {
   }
 }
 
+function getRendererDebugLogPath() {
+  try {
+    const dir = app.getPath("userData");
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, "renderer-debug.log");
+  } catch {
+    return null;
+  }
+}
+
+function appendRendererDebugLog(line) {
+  const logPath = getRendererDebugLogPath();
+  if (!logPath) return;
+  try {
+    fs.appendFileSync(logPath, line, { encoding: "utf8" });
+  } catch {}
+}
+
+function stringifyDebugDetails(details) {
+  if (details == null) return "";
+  if (typeof details === "string") return details;
+  try {
+    return JSON.stringify(details);
+  } catch (err) {
+    return `[unserializable:${err?.message || err}]`;
+  }
+}
+
 function setupRendererConsoleLogging(win) {
   if (!debugEnabled()) return;
 
@@ -915,6 +1405,62 @@ function setupRendererConsoleLogging(win) {
     append(
       `[${new Date().toISOString()}] [renderer] level=${level} ${message} (${sourceId}:${line})\n`
     );
+  });
+}
+
+function setupRendererLifecycleLogging(win) {
+  if (!debugEnabled()) return;
+
+  const logRendererLifecycle = (message) => {
+    logMain(`[renderer] ${message}`);
+  };
+
+  logRendererLifecycle(`window-created id=${win.id}`);
+
+  win.webContents.on("did-start-loading", () => {
+    logRendererLifecycle("did-start-loading");
+  });
+
+  win.webContents.on("dom-ready", () => {
+    logRendererLifecycle(`dom-ready url=${win.webContents.getURL()}`);
+  });
+
+  win.webContents.on("did-stop-loading", () => {
+    logRendererLifecycle("did-stop-loading");
+  });
+
+  win.webContents.on("did-finish-load", () => {
+    logRendererLifecycle(`did-finish-load url=${win.webContents.getURL()}`);
+  });
+
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    logRendererLifecycle(
+      `did-fail-load code=${errorCode} mainFrame=${!!isMainFrame} url=${validatedURL} error=${errorDescription}`
+    );
+  });
+
+  win.webContents.on("did-navigate", (_event, url, httpResponseCode, httpStatusText) => {
+    logRendererLifecycle(
+      `did-navigate url=${url} code=${httpResponseCode || 0} status=${httpStatusText || ""}`
+    );
+  });
+
+  win.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    logRendererLifecycle(`did-navigate-in-page mainFrame=${!!isMainFrame} url=${url}`);
+  });
+
+  win.webContents.on("render-process-gone", (_event, details) => {
+    logRendererLifecycle(
+      `render-process-gone reason=${details?.reason || ""} exitCode=${details?.exitCode ?? ""}`
+    );
+  });
+
+  win.on("unresponsive", () => {
+    logRendererLifecycle("window-unresponsive");
+  });
+
+  win.on("responsive", () => {
+    logRendererLifecycle("window-responsive");
   });
 }
 
@@ -961,18 +1507,26 @@ function createMainWindow() {
   });
 
   setupRendererConsoleLogging(win);
+  setupRendererLifecycleLogging(win);
 
   return win;
 }
 
 async function loadWithRetry(win, url) {
   const startedAt = Date.now();
+  let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    attempt += 1;
+    logMain(`[main] loadWithRetry attempt=${attempt} url=${url}`);
     try {
       await win.loadURL(url);
+      logMain(`[main] loadWithRetry success attempt=${attempt} elapsedMs=${Date.now() - startedAt} url=${url}`);
       return;
-    } catch {
+    } catch (err) {
+      logMain(
+        `[main] loadWithRetry failure attempt=${attempt} elapsedMs=${Date.now() - startedAt} url=${url} error=${err?.message || err}`
+      );
       if (Date.now() - startedAt > 60_000) throw new Error(`Failed to load URL in time: ${url}`);
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -1040,6 +1594,24 @@ function registerWindowIpc() {
     }
   });
 
+  ipcMain.handle("app:isDebugEnabled", () => {
+    try {
+      return debugEnabled();
+    } catch (err) {
+      logMain(`[main] app:isDebugEnabled failed: ${err?.message || err}`);
+      return false;
+    }
+  });
+
+  ipcMain.on("debug:log", (event, payload) => {
+    const scope = String(payload?.scope || "renderer").trim() || "renderer";
+    const message = String(payload?.message || "").trim() || "(empty)";
+    const url = String(payload?.url || event?.sender?.getURL?.() || "").trim();
+    const details = stringifyDebugDetails(payload?.details);
+    const suffix = details ? ` details=${details}` : "";
+    appendRendererDebugLog(`[${nowIso()}] [${scope}] ${message} url=${url}${suffix}\n`);
+  });
+
   ipcMain.handle("app:setCloseBehavior", (_event, behavior) => {
     try {
       const next = setCloseBehavior(behavior);
@@ -1051,12 +1623,109 @@ function registerWindowIpc() {
     }
   });
 
+  ipcMain.handle("backend:getPort", () => {
+    try {
+      return getBackendPort();
+    } catch (err) {
+      logMain(`[main] backend:getPort failed: ${err?.message || err}`);
+      return DEFAULT_BACKEND_PORT;
+    }
+  });
+
+  ipcMain.handle("backend:setPort", async (_event, port) => {
+    if (backendPortChangeInProgress) throw new Error("端口切换中，请稍后重试");
+    if (!app.isPackaged) {
+      throw new Error("开发模式不支持界面修改端口；请设置 WECHAT_TOOL_PORT 环境变量后重启");
+    }
+
+    const nextPort = parsePort(port);
+    if (nextPort == null) throw new Error("端口无效，请输入 1-65535 的整数");
+
+    const prevPort = getBackendPort();
+    if (nextPort === prevPort) {
+      return { success: true, changed: false, port: prevPort, uiUrl: getBackendUiUrl() };
+    }
+
+    const bindHost = getBackendBindHost();
+    const ok = await isPortAvailable(nextPort, bindHost);
+    if (!ok) throw new Error(`端口 ${nextPort} 已被占用，请换一个端口`);
+
+    backendPortChangeInProgress = true;
+    try {
+      setBackendPortSetting(nextPort);
+      try {
+        await restartBackend({ timeoutMs: 30_000 });
+      } catch (err) {
+        // Roll back to the previous port so the UI can keep working.
+        setBackendPortSetting(prevPort);
+        try {
+          await restartBackend({ timeoutMs: 30_000 });
+        } catch {}
+        throw err;
+      }
+
+      const uiUrl = getBackendUiUrl();
+      setTimeout(() => {
+        try {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          void loadWithRetry(mainWindow, uiUrl);
+        } catch (err) {
+          logMain(`[main] failed to reload UI after backend port change: ${err?.message || err}`);
+        }
+      }, 50);
+
+      return { success: true, changed: true, port: nextPort, uiUrl };
+    } finally {
+      backendPortChangeInProgress = false;
+    }
+  });
+
   ipcMain.handle("app:getVersion", () => {
     try {
       return app.getVersion();
     } catch (err) {
       logMain(`[main] getVersion failed: ${err?.message || err}`);
       return "";
+    }
+  });
+
+  ipcMain.handle("app:getOutputDir", () => {
+    const dir = resolveDataDir();
+    if (!dir) return "";
+    return path.join(dir, "output");
+  });
+
+  ipcMain.handle("app:openOutputDir", async () => {
+    const dir = resolveDataDir();
+    if (!dir) throw new Error("无法定位数据目录");
+    const outDir = path.join(dir, "output");
+    try {
+      fs.mkdirSync(outDir, { recursive: true });
+    } catch {}
+    try {
+      const err = await shell.openPath(outDir);
+      if (err) throw new Error(err);
+      return { success: true, path: outDir };
+    } catch (e) {
+      const message = e?.message || String(e);
+      logMain(`[main] openOutputDir failed: ${message}`);
+      throw new Error(message);
+    }
+  });
+
+  ipcMain.handle("app:getAccountInfo", async (_event, account) => {
+    try {
+      return getAccountInfoFromDisk(account);
+    } catch (e) {
+      throw new Error(e?.message || String(e));
+    }
+  });
+
+  ipcMain.handle("app:deleteAccountData", async (_event, account) => {
+    try {
+      return await deleteAccountDataFromDisk(account);
+    } catch (e) {
+      throw new Error(e?.message || String(e));
     }
   });
 
@@ -1078,6 +1747,11 @@ function registerWindowIpc() {
     }
 
     try {
+      // Safety: remove legacy `output` junctions in the install dir before triggering the NSIS update/uninstall.
+      // Some uninstall flows may traverse reparse points and delete the real per-user output directory.
+      try {
+        ensureOutputLink();
+      } catch {}
       autoUpdater.quitAndInstall(false, true);
       return { success: true };
     } catch (err) {
@@ -1114,19 +1788,46 @@ function registerWindowIpc() {
 
 async function main() {
   await app.whenReady();
+  await refreshRendererCacheForPackagedUi();
   Menu.setApplicationMenu(null);
   registerWindowIpc();
   registerDebugShortcuts();
 
-  // Resolve/create the data dir early so we can log reliably and (optionally) place a link
+  // Resolve/create the data dir early so we can log reliably and place helper files
   // next to the installed exe for easier access.
   resolveDataDir();
   ensureOutputLink();
+  await ensureBackendPortAvailableOnStartup();
 
   logMain(`[main] app.isPackaged=${app.isPackaged} argv=${JSON.stringify(process.argv)}`);
 
   startBackend();
-  await waitForBackend({ timeoutMs: 30_000 });
+  try {
+    await waitForBackend({ timeoutMs: 30_000 });
+  } catch (err) {
+    // In some environments a specific port may be blocked/reserved (WSAEACCES) or taken.
+    // Best-effort: pick a new port and retry once so the app can still start.
+    if (app.isPackaged) {
+      const prevPort = getBackendPort();
+      const bindHost = getBackendBindHost();
+      const nextPort = await chooseAvailablePort(prevPort + 1, bindHost);
+      if (nextPort != null && nextPort !== prevPort) {
+        logMain(`[main] backend not ready on port ${prevPort}; retrying on ${nextPort}`);
+        try {
+          setBackendPortSetting(nextPort);
+          await restartBackend({ timeoutMs: 30_000 });
+          logMain(`[main] backend retry succeeded on port ${nextPort}`);
+        } catch (retryErr) {
+          logMain(`[main] backend retry failed: ${retryErr?.stack || String(retryErr)}`);
+          throw retryErr;
+        }
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   const win = createMainWindow();
   mainWindow = win;
@@ -1134,8 +1835,9 @@ async function main() {
 
   const startUrl =
     process.env.ELECTRON_START_URL ||
-    (app.isPackaged ? `http://${BACKEND_HOST}:${BACKEND_PORT}/` : "http://localhost:3000");
+    (app.isPackaged ? getBackendUiUrl() : "http://localhost:3000");
 
+  logMain(`[main] debugEnabled=${debugEnabled()} startUrl=${startUrl}`);
   await loadWithRetry(win, startUrl);
 
   // Auto-check updates after the UI has loaded (packaged builds only).

@@ -10,8 +10,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
-from . import __version__ as APP_VERSION
 from .logging_config import setup_logging, get_logger
+
+# 初始化日志系统
+setup_logging()
+logger = get_logger(__name__)
+request_logger = get_logger("wechat_decrypt_tool.request")
+
+from . import __version__ as APP_VERSION
 from .path_fix import PathFixRoute
 from .chat_realtime_autosync import CHAT_REALTIME_AUTOSYNC
 from .routers.chat import router as _chat_router
@@ -20,18 +26,16 @@ from .routers.chat_export import router as _chat_export_router
 from .routers.chat_media import router as _chat_media_router
 from .routers.decrypt import router as _decrypt_router
 from .routers.health import router as _health_router
+from .routers.admin import router as _admin_router
 from .routers.keys import router as _keys_router
 from .routers.media import router as _media_router
 from .routers.sns import router as _sns_router
 from .routers.sns_export import router as _sns_export_router
 from .routers.wechat_detection import router as _wechat_detection_router
 from .routers.wrapped import router as _wrapped_router
+from .request_logging import log_server_errors_middleware
 from .sns_stage_timing import add_sns_stage_timing_headers
 from .wcdb_realtime import WCDB_REALTIME, shutdown as _wcdb_shutdown
-
-# 初始化日志系统
-setup_logging()
-logger = get_logger(__name__)
 
 app = FastAPI(
     title="微信数据库解密工具",
@@ -74,7 +78,13 @@ async def _add_sns_stage_timing_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def _log_server_errors(request: Request, call_next):
+    return await log_server_errors_middleware(request_logger, request, call_next)
+
+
 app.include_router(_health_router)
+app.include_router(_admin_router)
 app.include_router(_wechat_detection_router)
 app.include_router(_decrypt_router)
 app.include_router(_keys_router)
@@ -96,9 +106,36 @@ class _SPAStaticFiles(StaticFiles):
         self._fallback_200 = Path(str(self.directory)) / "200.html"
         self._fallback_index = Path(str(self.directory)) / "index.html"
 
-    async def get_response(self, path: str, scope):  # type: ignore[override]
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        return str(path or "").strip().lstrip("/")
+
+    @classmethod
+    def _is_shell_path(cls, path: str) -> bool:
+        normalized = cls._normalize_path(path)
+        return normalized in {"", "index.html", "200.html", "_payload.json"} or normalized.startswith(
+            "_payload.json/"
+        )
+
+    @classmethod
+    def _apply_cache_headers(cls, path: str, response):
+        normalized = cls._normalize_path(path)
         try:
-            return await super().get_response(path, scope)
+            if cls._is_shell_path(normalized):
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            elif normalized.startswith("_nuxt/"):
+                response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        except Exception:
+            pass
+        return response
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        normalized = self._normalize_path(path)
+        try:
+            response = await super().get_response(path, scope)
+            return self._apply_cache_headers(normalized, response)
         except StarletteHTTPException as exc:
             if exc.status_code != 404:
                 raise
@@ -109,8 +146,8 @@ class _SPAStaticFiles(StaticFiles):
                 raise
 
             if self._fallback_200.exists():
-                return FileResponse(str(self._fallback_200))
-            return FileResponse(str(self._fallback_index))
+                return self._apply_cache_headers("200.html", FileResponse(str(self._fallback_200)))
+            return self._apply_cache_headers("index.html", FileResponse(str(self._fallback_index)))
 
 
 def _maybe_mount_frontend() -> None:
@@ -192,6 +229,8 @@ async def _shutdown_wcdb_realtime() -> None:
 if __name__ == "__main__":
     import uvicorn
 
+    from .runtime_settings import read_effective_backend_port
+
     host = os.environ.get("WECHAT_TOOL_HOST", "127.0.0.1")
-    port = int(os.environ.get("WECHAT_TOOL_PORT", "8000"))
+    port, _ = read_effective_backend_port(default=10392)
     uvicorn.run(app, host=host, port=port)

@@ -3,11 +3,13 @@
     <SidebarRail v-if="showSidebar" />
     <div class="flex-1 flex flex-col min-h-0">
       <!-- Desktop titlebar lives above the page content (right column) -->
-      <DesktopTitleBar />
+      <DesktopTitleBar v-if="showDesktopTitleBar" />
       <div :class="contentClass">
         <NuxtPage />
       </div>
     </div>
+
+    <SettingsDialog :open="settingsDialogOpen" @close="closeSettingsDialog" />
 
     <ClientOnly v-if="isDesktopUpdater">
       <DesktopUpdateDialog
@@ -28,11 +30,18 @@
 </template>
 
 <script setup>
+import { useThemeStore } from '~/stores/theme'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
 const route = useRoute()
 const desktopUpdate = useDesktopUpdate()
+const { open: settingsDialogOpen, closeDialog: closeSettingsDialog } = useSettingsDialog()
+const themeStore = useThemeStore()
+
+if (process.client) {
+  themeStore.init()
+}
 
 // In Electron the server/pre-render doesn't know about `window.wechatDesktop`.
 // If we render different DOM on server vs client, Vue hydration will keep the
@@ -68,6 +77,7 @@ onMounted(() => {
   const privacy = usePrivacyStore()
   void chatAccounts.ensureLoaded()
   privacy.init()
+  themeStore.init()
 })
 
 onBeforeUnmount(() => {
@@ -75,7 +85,7 @@ onBeforeUnmount(() => {
 })
 
 const rootClass = computed(() => {
-  const base = 'bg-gradient-to-br from-green-50 via-emerald-50 to-green-100'
+  const base = 'theme-app-shell'
   return isDesktop.value
     ? `wechat-desktop h-screen flex overflow-hidden ${base}`
     : `h-screen flex overflow-hidden ${base}`
@@ -86,6 +96,8 @@ const contentClass = computed(() =>
     ? 'wechat-desktop-content flex-1 overflow-auto min-h-0'
     : 'flex-1 overflow-auto min-h-0'
 )
+
+const showDesktopTitleBar = computed(() => isDesktop.value)
 
 const showSidebar = computed(() => {
   const path = String(route.path || '')
@@ -120,5 +132,16 @@ const showSidebar = computed(() => {
 
 .wechat-desktop .wechat-desktop-content > .min-h-screen {
   min-height: 100%;
+}
+
+.theme-app-shell {
+  background:
+    radial-gradient(circle at top left, rgba(7, 193, 96, 0.08), transparent 32%),
+    radial-gradient(circle at top right, rgba(16, 174, 239, 0.08), transparent 36%),
+    linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 45%, #dcfce7 100%);
+}
+
+html[data-theme='dark'] .theme-app-shell {
+  background: var(--app-shell-bg);
 }
 </style>

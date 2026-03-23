@@ -1,7 +1,7 @@
 <template>
-  <div class="h-screen flex overflow-hidden" style="background-color: #EDEDED">
+  <div class="sns-page h-screen flex overflow-hidden" style="background-color: var(--app-shell-bg)">
     <!-- 左侧朋友圈联系人 -->
-    <div class="w-[280px] flex flex-col min-h-0 border-r border-gray-200 bg-[#EDEDED]">
+    <div class="w-[280px] flex flex-col min-h-0 border-r border-gray-200 bg-[#EDEDED]" style="background-color: var(--app-shell-bg)">
       <div class="p-3">
         <div class="flex items-center justify-between">
           <div class="text-sm font-semibold text-gray-700">朋友圈联系人</div>
@@ -104,7 +104,7 @@
     </div>
 
     <!-- 右侧朋友圈区域 -->
-    <div class="flex-1 flex flex-col min-h-0" style="background-color: #EDEDED">
+    <div class="flex-1 flex flex-col min-h-0" style="background-color: var(--app-shell-bg)">
       <div ref="timelineScrollEl" class="flex-1 overflow-auto min-h-0 bg-white" @scroll="onScroll">
 	        <div class="max-w-2xl mx-auto px-4 py-4">
             <div class="relative w-full mb-12 -mt-4 bg-white">
@@ -638,7 +638,19 @@
 	    >
 	      <div class="relative max-w-[92vw] max-h-[92vh] flex flex-col items-center" @click.stop>
 	        <video
-	          v-if="previewLivePhotoVideoSrc && !previewHasLivePhotoVideoError"
+	          v-if="previewIsVideo"
+	          ref="previewVideoEl"
+	          :key="previewVideoKey"
+	          :src="previewVideoSrc"
+	          :poster="previewVideoPoster"
+	          class="max-w-[90vw] max-h-[70vh] object-contain"
+	          controls
+	          autoplay
+	          playsinline
+	          @error="onPreviewVideoError"
+	        ></video>
+	        <video
+	          v-else-if="previewLivePhotoVideoSrc && !previewHasLivePhotoVideoError"
 	          ref="previewLiveVideoEl"
 	          :src="previewLivePhotoVideoSrc"
 	          :poster="previewSrc"
@@ -650,6 +662,13 @@
 	          @error="onPreviewLivePhotoVideoError"
 	        ></video>
 	        <img v-else :src="previewSrc" alt="预览" class="max-w-[90vw] max-h-[70vh] object-contain" />
+
+	        <div
+	          v-if="previewIsVideo && previewVideoError"
+	          class="mt-3 text-xs text-red-200 whitespace-pre-wrap text-center max-w-[90vw]"
+	        >
+	          {{ previewVideoError }}
+	        </div>
 
 	      </div>
 
@@ -686,8 +705,9 @@
 import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
-import { parseTextWithEmoji } from '~/utils/wechat-emojis'
-import { SNS_SETTING_USE_CACHE_KEY, readLocalBoolSetting } from '~/utils/desktop-settings'
+import { parseTextWithEmoji } from '~/lib/wechat-emojis'
+import { SNS_SETTING_USE_CACHE_KEY, readLocalBoolSetting } from '~/lib/desktop-settings'
+import { reportServerErrorFromError } from '~/lib/server-error-logging'
 
 useHead({ title: '朋友圈 - 微信数据分析助手' })
 
@@ -794,7 +814,7 @@ const filteredSnsUsers = computed(() => {
 
 const pageSize = 20
 
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 
 // 朋友圈导出（HTML 离线 ZIP）
 const exportJob = ref(null)
@@ -835,8 +855,7 @@ const startSnsExportPolling = (exportId) => {
   if (!exportId) return
 
   if (process.client && typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
-    const base = 'http://localhost:8000'
-    const url = `${base}/api/sns/exports/${encodeURIComponent(String(exportId))}/events`
+    const url = `${apiBase}/sns/exports/${encodeURIComponent(String(exportId))}/events`
     try {
       exportEventSource = new EventSource(url)
       exportEventSource.onmessage = (ev) => {
@@ -867,8 +886,7 @@ const downloadSnsExport = (exportId) => {
   if (!process.client) return
   const id = String(exportId || '').trim()
   if (!id) return
-  const base = 'http://localhost:8000'
-  const url = `${base}/api/sns/exports/${encodeURIComponent(id)}/download`
+  const url = `${apiBase}/sns/exports/${encodeURIComponent(id)}/download`
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
@@ -1109,11 +1127,17 @@ const selfInfo = ref({ wxid: '', nickname: '' })
 const loadSelfInfo = async () => {
   if (!selectedAccount.value) return
   try {
-    const resp = await $fetch(`${mediaBase}/api/sns/self_info?account=${encodeURIComponent(selectedAccount.value)}`)
+    const resp = await $fetch(`${apiBase}/sns/self_info?account=${encodeURIComponent(selectedAccount.value)}`)
     if (resp && resp.wxid) {
       selfInfo.value = resp
     }
   } catch (e) {
+    await reportServerErrorFromError(e, {
+      method: 'GET',
+      requestUrl: `${apiBase}/sns/self_info?account=${encodeURIComponent(selectedAccount.value)}`,
+      source: 'sns.loadSelfInfo',
+      apiBase,
+    })
     console.error('获取个人信息失败', e)
   }
 }
@@ -1145,7 +1169,7 @@ const selectSnsUser = async (username) => {
 const getArticleThumbProxyUrl = (contentUrl) => {
   const u = String(contentUrl || '').trim()
   if (!u) return ''
-  return `${mediaBase}/api/sns/article_thumb?url=${encodeURIComponent(u)}`
+  return `${apiBase}/sns/article_thumb?url=${encodeURIComponent(u)}`
 }
 
 const guessOfficialAccountNameFromTitle = (title) => {
@@ -1443,7 +1467,7 @@ const postAvatarUrl = (username) => {
   const acc = String(selectedAccount.value || '').trim()
   const u = String(username || '').trim()
   if (!acc || !u) return ''
-  return `${mediaBase}/api/chat/avatar?account=${encodeURIComponent(acc)}&username=${encodeURIComponent(u)}`
+  return `${apiBase}/chat/avatar?account=${encodeURIComponent(acc)}&username=${encodeURIComponent(u)}`
 }
 
 const cleanLikeName = (v) => String(v ?? '').replace(/\u00A0/g, ' ').trim()
@@ -1460,7 +1484,7 @@ const normalizeMediaUrl = (u) => {
   try {
     const host = new URL(raw).hostname.toLowerCase()
     if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
-      return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+      return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
     }
   } catch {}
   return raw
@@ -1515,8 +1539,10 @@ const getSnsMediaUrl = (post, m, idx, rawUrl) => {
   if (!raw) return ''
   const rawLower = raw.toLowerCase()
 
-  // If backend already provides a local media endpoint, keep it as-is.
-  if (rawLower.startsWith('/api/') || rawLower.startsWith('blob:') || rawLower.startsWith('data:')) return raw
+  // If backend already provides a local media endpoint, rewrite it to the effective API base
+  // (so web builds with a custom API port still work).
+  if (rawLower.startsWith('/api/')) return `${apiBase}${raw.slice(4)}`
+  if (rawLower.startsWith('blob:') || rawLower.startsWith('data:')) return raw
 
   // For Moments images/thumbnails, prefer a backend endpoint that can decrypt local cache.
   if (/^https?:\/\//i.test(raw)) {
@@ -1568,7 +1594,7 @@ const getSnsMediaUrl = (post, m, idx, rawUrl) => {
         // Bump this when changing backend matching logic to avoid stale cached wrong images.
         parts.set('v', '9')
         parts.set('url', raw)
-        return `${mediaBase}/api/sns/media?${parts.toString()}`
+        return `${apiBase}/sns/media?${parts.toString()}`
       }
     } catch {}
   }
@@ -1589,7 +1615,7 @@ const getSnsVideoUrl = (postId, mediaId) => {
   // 本地缓存视频
   const acc = String(selectedAccount.value || '').trim()
   if (!acc || !postId || !mediaId) return ''
-  return `${mediaBase}/api/sns/video?account=${encodeURIComponent(acc)}&post_id=${encodeURIComponent(postId)}&media_id=${encodeURIComponent(mediaId)}`
+  return `${apiBase}/sns/video?account=${encodeURIComponent(acc)}&post_id=${encodeURIComponent(postId)}&media_id=${encodeURIComponent(mediaId)}`
 }
 
 const getSnsRemoteVideoSrc = (post, m) => {
@@ -1610,7 +1636,7 @@ const getSnsRemoteVideoSrc = (post, m) => {
   // When cache is disabled, bust browser caching so backend really downloads+decrypts each time.
   if (!snsUseCache.value) parts.set('_t', String(Date.now()))
   parts.set('v', '1')
-  return `${mediaBase}/api/sns/video_remote?${parts.toString()}`
+  return `${apiBase}/sns/video_remote?${parts.toString()}`
 }
 
 const localVideoStatus = ref({})
@@ -1726,7 +1752,7 @@ const getLivePhotoVideoSrc = (post, m, idx = 0) => {
   if (!snsUseCache.value) parts.set('_t', String(Date.now()))
   // Version bump for frontend cache busting when endpoint changes.
   parts.set('v', '1')
-  return `${mediaBase}/api/sns/video_remote?${parts.toString()}`
+  return `${apiBase}/sns/video_remote?${parts.toString()}`
 }
 
 // 图片预览 + 候选匹配选择
@@ -1754,6 +1780,53 @@ const previewSrc = computed(() => {
   const ctx = previewCtx.value
   if (!ctx) return ''
   return getMediaPreviewSrc(ctx.post, ctx.media, ctx.idx)
+})
+
+const previewVideoEl = ref(null)
+const previewVideoMode = ref('') // 'local' | 'remote' | 'raw'
+const previewVideoError = ref('')
+const previewVideoTried = reactive({ local: false, remote: false, raw: false })
+
+const resetPreviewVideo = () => {
+  previewVideoMode.value = ''
+  previewVideoError.value = ''
+  previewVideoTried.local = false
+  previewVideoTried.remote = false
+  previewVideoTried.raw = false
+}
+
+const previewIsVideo = computed(() => {
+  const ctx = previewCtx.value
+  if (!ctx) return false
+  return Number(ctx.media?.type || 0) === 6
+})
+
+const previewVideoPoster = computed(() => {
+  const ctx = previewCtx.value
+  if (!ctx) return ''
+  if (Number(ctx.media?.type || 0) !== 6) return ''
+  return getMediaThumbSrc(ctx.post, ctx.media, ctx.idx) || ''
+})
+
+const previewVideoSrc = computed(() => {
+  const ctx = previewCtx.value
+  if (!ctx) return ''
+  if (Number(ctx.media?.type || 0) !== 6) return ''
+
+  const local = getSnsVideoUrl(ctx.post?.id, ctx.media?.id)
+  const remote = getSnsRemoteVideoSrc(ctx.post, ctx.media)
+  const raw = upgradeTencentHttps(String(ctx.media?.url || '').trim())
+
+  const mode = String(previewVideoMode.value || '').toLowerCase()
+  if (mode === 'local') return local
+  if (mode === 'remote') return remote
+  if (mode === 'raw') return raw
+  return local || remote || raw || ''
+})
+
+const previewVideoKey = computed(() => {
+  if (!previewIsVideo.value) return ''
+  return `${String(previewVideoMode.value || '')}:${String(previewVideoSrc.value || '')}`
 })
 
 const previewLivePhotoVideoSrc = computed(() => {
@@ -1879,6 +1952,7 @@ const loadPreviewCandidates = async ({ reset }) => {
 
 const openImagePreview = async (post, m, idx = 0) => {
   if (!process.client) return
+  resetPreviewVideo()
   // Stop any background hover-playing live photo when opening the preview.
   activeLivePhotoKey.value = ''
   // Preview is an intentional action; allow retry even if hover playback failed once.
@@ -1898,11 +1972,58 @@ const openImagePreview = async (post, m, idx = 0) => {
   await loadPreviewCandidates({ reset: true })
 }
 
+const openVideoPreview = (post, m, idx = 0) => {
+  if (!process.client) return
+  resetPreviewVideo()
+  activeLivePhotoKey.value = ''
+
+  const local = getSnsVideoUrl(post?.id, m?.id)
+  const remote = getSnsRemoteVideoSrc(post, m)
+  const raw = upgradeTencentHttps(String(m?.url || '').trim())
+
+  if (local) previewVideoMode.value = 'local'
+  else if (remote) previewVideoMode.value = 'remote'
+  else if (raw) previewVideoMode.value = 'raw'
+  else previewVideoError.value = '视频地址缺失。'
+
+  previewCtx.value = { post, media: m, idx: Number(idx) || 0 }
+  previewCandidatesOpen.value = false
+  resetPreviewCandidates()
+  document.body.style.overflow = 'hidden'
+}
+
+const onPreviewVideoError = () => {
+  const ctx = previewCtx.value
+  if (!ctx) return
+  if (Number(ctx.media?.type || 0) !== 6) return
+
+  const current = String(previewVideoMode.value || '').toLowerCase()
+  if (current === 'local') previewVideoTried.local = true
+  if (current === 'remote') previewVideoTried.remote = true
+  if (current === 'raw') previewVideoTried.raw = true
+
+  // Fallback order: local -> remote -> raw
+  const remote = getSnsRemoteVideoSrc(ctx.post, ctx.media)
+  if (!previewVideoTried.remote && remote) {
+    previewVideoMode.value = 'remote'
+    return
+  }
+
+  const raw = upgradeTencentHttps(String(ctx.media?.url || '').trim())
+  if (!previewVideoTried.raw && raw) {
+    previewVideoMode.value = 'raw'
+    return
+  }
+
+  previewVideoError.value = '视频加载失败：可能是本地缓存不存在，或远程下载/解密失败。'
+}
+
 const closeImagePreview = () => {
   if (!process.client) return
   previewCtx.value = null
   previewCandidatesOpen.value = false
   resetPreviewCandidates()
+  resetPreviewVideo()
   document.body.style.overflow = ''
 }
 
@@ -1912,16 +2033,7 @@ const onMediaClick = (post, m, idx = 0) => {
 
   // 视频点击逻辑
   if (mt === 6) {
-    // Open a playable mp4 via backend (downloads+decrypts as needed).
-    const remoteUrl = getSnsRemoteVideoSrc(post, m)
-    if (remoteUrl) {
-      window.open(remoteUrl, '_blank', 'noopener,noreferrer')
-      return
-    }
-
-    // Last-resort: open raw CDN url.
-    const u = String(m?.url || '').trim()
-    if (u) window.open(u, '_blank', 'noopener,noreferrer')
+    openVideoPreview(post, m, idx)
     return
   }
 
@@ -2114,7 +2226,7 @@ const getProxyExternalUrl = (url) => {
   // 目前难以计算enc，代理获取封面图（thumbnail）
   const u = String(url || '').trim()
   if (!u) return ''
-  return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(u)}`
+  return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(u)}`
 }
 
 

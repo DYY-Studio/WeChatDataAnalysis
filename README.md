@@ -4,50 +4,74 @@
 
 <div align="center">
     <h1>WeChatDataAnalysis - 微信数据库解密与分析工具</h1>
-    <p>一个专门用于微信4.x版本数据库解密的工具（支持聊天记录实时更新）</p>
+    <p>微信4.x数据解密并生成年度总结，高仿微信，支持实时更新，导出聊天记录，朋友圈等大量便捷功能</p>
     <p><b>特别致谢</b>：<a href="https://github.com/H3CoF6">H3CoF6</a>（密钥与朋友圈等核心内容的技术支持）、<a href="https://github.com/ycccccccy/echotrace">echotrace</a>、<a href="https://github.com/hicccc77/WeFlow">WeFlow</a>（本项目大量功能参考其实现）</p>
     <img src="https://img.shields.io/github/v/tag/LifeArchiveProject/WeChatDataAnalysis" alt="Version" />
     <img src="https://img.shields.io/github/stars/LifeArchiveProject/WeChatDataAnalysis" alt="Stars" />
     <img src="https://gh-down-badges.linkof.link/LifeArchiveProject/WeChatDataAnalysis" alt="Downloads" />
     <img src="https://img.shields.io/github/forks/LifeArchiveProject/WeChatDataAnalysis" alt="Forks" />
-    <a href="https://qm.qq.com/q/VQEQ7PcGkk"><img src="https://img.shields.io/badge/QQ%20Group-WeChatDataAnalysis-12B7F5?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
+    <a href="https://qm.qq.com/q/VQEQ7PcGkk"><img src="https://img.shields.io/badge/QQ Group-WeChatDataAnalysis-12B7F5?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
     <img src="https://img.shields.io/badge/Python-3776AB?logo=Python&logoColor=white" alt="Python" />
     <img src="https://img.shields.io/badge/Vue.js-4FC08D?logo=Vue.js&logoColor=white" alt="Vue.js" />
     <img src="https://img.shields.io/badge/SQLite-003B57?logo=SQLite&logoColor=white" alt="SQLite" />
 </div>
 
+## 年度总结
+
+<table>
+  <tr>
+    <td align="center" colspan="2"><img src="frontend/public/style1.png" alt="年度总结 Modern" width="800"/></td>
+  </tr>
+  <tr>
+    <td><img src="frontend/public/AnnualSummary1.png" alt="AnnualSummary 1" width="400"/></td>
+    <td><img src="frontend/public/AnnualSummary2.png" alt="AnnualSummary 2" width="400"/></td>
+  </tr>
+  <tr>
+    <td><img src="frontend/public/AnnualSummary3.png" alt="AnnualSummary 3" width="400"/></td>
+    <td><img src="frontend/public/AnnualSummary4.gif" alt="AnnualSummary 4" width="400"/></td>
+  </tr>
+  <tr>
+    <td><img src="frontend/public/AnnualSummary5.gif" alt="AnnualSummary 5" width="400"/></td>
+    <td><img src="frontend/public/AnnualSummary6.png" alt="AnnualSummary 6" width="400"/></td>
+  </tr>
+  <tr>
+    <td><img src="frontend/public/AnnualSummary7.png" alt="AnnualSummary 7" width="400"/></td>
+    <td><img src="frontend/public/AnnualSummary8.png" alt="AnnualSummary 8" width="400"/></td>
+  </tr>
+</table>
+
 ## 界面预览
 
 <table>
   <tr>
-    <td align="center"><b>首页</b></td>
-    <td align="center"><b>检测页面</b></td>
-  </tr>
-  <tr>
-    <td><img src="frontend/public/home.png" alt="首页" width="400"/></td>
-    <td><img src="frontend/public/detection.png" alt="微信检测页面" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center"><b>解密页面</b></td>
-    <td align="center"><b>图片密钥（填写）</b></td>
-  </tr>
-  <tr>
-    <td><img src="frontend/public/decrypt.png" alt="数据库解密页面" width="400"/></td>
-    <td><img src="frontend/public/imageAES.png" alt="图片密钥（填写）" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center"><b>图片解密页面</b></td>
-    <td align="center"><b>解密成功页面</b></td>
-  </tr>
-  <tr>
-    <td><img src="frontend/public/imageSucces.png" alt="图片解密页面" width="400"/></td>
-    <td><img src="frontend/public/success.png" alt="解密成功页面" width="400"/></td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2"><b>聊天记录页面</b></td>
+    <td align="center" colspan="2"><b>聊天记录页面</b>（支持多种消息类型展示，样式尽可能与微信保持一致）</td>
   </tr>
   <tr>
     <td colspan="2" align="center"><img src="frontend/public/message.png" alt="聊天记录页面" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>修改消息</b>（本地修改，支持恢复）</td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="frontend/public/edit.gif" alt="修改消息" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>实时消息同步</b>（点击侧边栏闪电图标后，消息会自动刷新）</td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="frontend/public/RealTimeMessages.gif" alt="实时消息同步" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>设置面板</b>（桌面行为、启动偏好、更新、朋友圈缓存策略）</td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="frontend/public/setting.png" alt="设置面板" width="800"/></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>朋友圈</b>（支持查看用户之前朋友圈的背景图及时间；本地查看过的朋友圈即使后续不可见也可以查看）</td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="frontend/public/sns.png" alt="朋友圈" width="800"/></td>
   </tr>
   <tr>
     <td align="center" colspan="2"><b>聊天记录搜索</b></td>
@@ -61,21 +85,17 @@
   <tr>
     <td colspan="2" align="center"><img src="frontend/public/export.png" alt="聊天记录导出" width="800"/></td>
   </tr>
-</table>
-
-## 年度总结
-
-> ⚠️ **提醒**：年度总结目前还不是最终版本，后续还会增加新总结或新内容。
-
-也欢迎加入下方 QQ 群一起讨论。
-
-<table>
   <tr>
-    <td align="center"><img src="frontend/public/style1.png" alt="年度总结 Modern"/></td>
+    <td align="center" colspan="2"><b>联系人导出</b></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="frontend/public/Contact.png" alt="联系人导出" width="800"/></td>
   </tr>
 </table>
 
 ## 加入群聊
+
+也欢迎加入下方 QQ 群一起讨论。
 
 <p align="center">
     <a href="https://qm.qq.com/q/VQEQ7PcGkk">
@@ -134,8 +154,9 @@ npm run dev
 #### 2.5 访问应用
 
 - 前端界面: http://localhost:3000
-- API服务: http://localhost:8000
-- API文档: http://localhost:8000/docs
+- API服务(默认): http://localhost:10392 （可通过环境变量 WECHAT_TOOL_PORT 修改）
+- API文档(默认): http://localhost:10392/docs
+- 也可在应用内“设置 -> 后端端口”修改（支持“恢复默认”一键回到 10392）：网页端会尝试重启本机后端到新端口并刷新（并写入 `output/runtime_settings.json`，开发模式下也会写入项目根目录 `.env` 供 `uv run` 下次启动使用）；桌面端会重启内置后端并刷新
 
 ## 打包为 EXE（Windows 桌面端）
 
@@ -170,6 +191,43 @@ npm run dist
 2. **密钥安全**: 请妥善保管您的解密密钥，不要泄露给他人
 3. **数据隐私**: 解密后的数据包含个人隐私信息，请谨慎处理
 4. **合法使用**: 请遵守相关法律法规，不得用于非法目的
+
+## 修改消息
+
+支持在聊天页对单条消息进行本地修改（如修改消息文本/字段、修复为我发送、反转本地气泡方向），并在“修改记录”页查看原始与当前对比，支持单条恢复或按会话一键恢复。
+
+该功能只修改本机本地数据库（`db_storage` 与解密副本），不会调用远端回写接口。
+
+<p align="center">
+  <img src="frontend/public/edit.gif" alt="本地消息修改" width="800" />
+</p>
+
+## 赞助与支持
+
+如果本项目对你有帮助，欢迎通过以下方式赞助。付款时请在备注中填写“希望公开展示的链接”（如个人主页、B 站空间、GitHub 仓库等），我们会在 README 的“赞助鸣谢”表格中展示。
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="https://github.com/LifeArchiveProject/BilibiliHistoryFetcher/raw/master/public/wechat.png" alt="微信收款码" width="220"><br>
+        微信赞助
+      </td>
+      <td align="center">
+        <img src="https://github.com/LifeArchiveProject/BilibiliHistoryFetcher/raw/master/public/zfb.jpg" alt="支付宝收款码" width="220"><br>
+        支付宝赞助
+      </td>
+    </tr>
+  </table>
+</div>
+
+### 赞助鸣谢
+
+| 联系内容                                              | 付款金额 |
+| ----------------------------------------------------- | -------- |
+| [惜囍的个人空间-哔哩哔哩](https://space.bilibili.com/291501729) | ￥29.99      |
+
+提示：已赞助但未收录，请在 Issues 提交凭证与备注链接；如需匿名可说明。
 
 ## 致谢
 

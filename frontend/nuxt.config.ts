@@ -1,19 +1,31 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+const frontendHost = String(process.env.NUXT_HOST || '').trim()
+const frontendPort = Number.parseInt(String(process.env.NUXT_PORT || process.env.PORT || '3000').trim(), 10)
+const backendPort = String(process.env.WECHAT_TOOL_PORT || '10392').trim() || '10392'
+const devProxyTarget = `http://127.0.0.1:${backendPort}/api`
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: false },
+  experimental: {
+    // This app does not use Nuxt route rules on the client, so disabling
+    // the app manifest avoids an unnecessary `/_nuxt/builds/meta/dev.json`
+    // preload request and the related Chrome warning in dev mode.
+    appManifest: false,
+  },
 
   runtimeConfig: {
     public: {
       // Full API base, including `/api` when needed.
-      // Example: `NUXT_PUBLIC_API_BASE=http://127.0.0.1:8000/api`
+      // Example: `NUXT_PUBLIC_API_BASE=http://127.0.0.1:10392/api`
       apiBase: process.env.NUXT_PUBLIC_API_BASE || '/api',
     },
   },
   
   // 配置前端开发服务器端口
   devServer: {
-    port: 3000
+    ...(frontendHost ? { host: frontendHost } : {}),
+    port: Number.isInteger(frontendPort) && frontendPort >= 1 && frontendPort <= 65535 ? frontendPort : 3000
   },
   
   // 配置API代理，解决跨域问题
@@ -22,12 +34,17 @@ export default defineNuxtConfig({
       '/api': {
         // `h3` strips the matched prefix (`/api`) before calling the middleware,
         // so the proxy target must include `/api` to preserve backend routes.
-        target: 'http://127.0.0.1:8000/api',
+        target: devProxyTarget,
         changeOrigin: true
       }
     }
   },
   
+  // 应用配置
+  css: [
+    '~/assets/css/chat.css'
+  ],
+
   // 应用配置
   app: {
     head: {

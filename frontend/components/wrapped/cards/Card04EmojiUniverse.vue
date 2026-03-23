@@ -58,7 +58,7 @@
                     class="mt-0.5 inline-flex items-center gap-1.5 rounded-md bg-[#00000008] px-1.5 py-1 max-w-full"
                     :title="heroStickerOwnerName ? `常发送给 ${heroStickerOwnerName}` : '常发送给：未知'"
                   >
-                    <span class="w-4 h-4 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0">
+                    <span class="w-4 h-4 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0 wrapped-privacy-avatar">
                       <img
                         v-if="heroStickerOwnerAvatarUrl && avatarOk.topStickerOwner"
                         :src="heroStickerOwnerAvatarUrl"
@@ -71,7 +71,7 @@
                       </span>
                     </span>
                     <span class="wrapped-body text-[11px] text-[#00000080] truncate">
-                      常发送给 <span class="text-[#07C160] font-semibold">{{ heroStickerOwnerName || '未知' }}</span>
+                      常发送给 <span class="text-[#07C160] font-semibold wrapped-privacy-name">{{ heroStickerOwnerName || '未知' }}</span>
                     </span>
                   </div>
 
@@ -260,7 +260,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import Stack from '~/components/wrapped/shared/VueBitsStack.vue'
-import WechatEmojiTable, { parseTextWithEmoji } from '~/utils/wechat-emojis'
+import WechatEmojiTable, { parseTextWithEmoji } from '~/lib/wechat-emojis'
 
 const props = defineProps({
   card: { type: Object, required: true },
@@ -270,7 +270,7 @@ const props = defineProps({
 const nfInt = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 })
 const formatInt = (n) => nfInt.format(Math.round(Number(n) || 0))
 
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 const resolveMediaUrl = (value, opts = { backend: false }) => {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -278,13 +278,15 @@ const resolveMediaUrl = (value, opts = { backend: false }) => {
     try {
       const host = new URL(raw).hostname.toLowerCase()
       if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
-        return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+        return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
       }
     } catch {}
     return raw
   }
-  if (opts.backend || raw.startsWith('/api/')) {
-    return `${mediaBase}${raw.startsWith('/') ? '' : '/'}${raw}`
+  if (/^\/api\//i.test(raw)) return `${apiBase}${raw.slice(4)}`
+  if (opts.backend) {
+    const origin = apiBase.endsWith('/api') ? apiBase.slice(0, -4) : apiBase
+    return `${origin}${raw.startsWith('/') ? '' : '/'}${raw}`
   }
   return raw.startsWith('/') ? raw : `/${raw}`
 }

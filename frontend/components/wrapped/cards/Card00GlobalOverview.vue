@@ -36,11 +36,8 @@
           <template v-if="topContact || topGroup">
             <template v-if="topContact">
               你发消息最多的人是
-              「<span
-                class="privacy-blur inline-flex items-center gap-2 align-bottom max-w-[12rem]"
-                :title="topContact.displayName"
-              >
-                <span class="w-6 h-6 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0">
+              「<span class="inline-flex items-center gap-2 align-bottom max-w-[12rem]" :title="topContact.displayName">
+                <span class="w-6 h-6 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0 wrapped-privacy-avatar">
                   <img
                     v-if="topContactAvatarUrl && avatarOk.topContact"
                     :src="topContactAvatarUrl"
@@ -52,18 +49,15 @@
                     {{ avatarFallback(topContact.displayName) }}
                   </span>
                 </span>
-                <span class="inline-block max-w-[10rem] truncate align-bottom">{{ topContact.displayName }}</span>
+                <span class="wrapped-privacy-name inline-block max-w-[10rem] truncate align-bottom">{{ topContact.displayName }}</span>
               </span>」
               （<span class="wrapped-number text-[#07C160] font-semibold">{{ formatInt(topContact.messages) }}</span> 条）
             </template>
             <template v-if="topContact && topGroup">，</template>
             <template v-if="topGroup">
               你最常发言的群是
-              「<span
-                class="privacy-blur inline-flex items-center gap-2 align-bottom max-w-[12rem]"
-                :title="topGroup.displayName"
-              >
-                <span class="w-6 h-6 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0">
+              「<span class="inline-flex items-center gap-2 align-bottom max-w-[12rem]" :title="topGroup.displayName">
+                <span class="w-6 h-6 rounded-md overflow-hidden bg-[#0000000d] flex items-center justify-center flex-shrink-0 wrapped-privacy-avatar">
                   <img
                     v-if="topGroupAvatarUrl && avatarOk.topGroup"
                     :src="topGroupAvatarUrl"
@@ -75,7 +69,7 @@
                     {{ avatarFallback(topGroup.displayName) }}
                   </span>
                 </span>
-                <span class="inline-block max-w-[10rem] truncate align-bottom">{{ topGroup.displayName }}</span>
+                <span class="wrapped-privacy-name inline-block max-w-[10rem] truncate align-bottom">{{ topGroup.displayName }}</span>
               </span>」
               （<span class="wrapped-number text-[#07C160] font-semibold">{{ formatInt(topGroup.messages) }}</span> 条）
             </template>
@@ -87,10 +81,7 @@
           </template>
 
           <template v-if="topPhrase && topPhrase.phrase && topPhrase.count > 0">
-            你说得最多的一句话是「<span
-              class="privacy-blur inline-block max-w-[12rem] truncate align-bottom"
-              :title="topPhrase.phrase"
-            >{{ topPhrase.phrase }}</span>」（<span class="wrapped-number text-[#07C160] font-semibold">{{ formatInt(topPhrase.count) }}</span> 次）。
+            你说得最多的一句话是「<span class="inline-block max-w-[12rem] truncate align-bottom" :title="topPhrase.phrase">{{ topPhrase.phrase }}</span>」（<span class="wrapped-number text-[#07C160] font-semibold">{{ formatInt(topPhrase.count) }}</span> 次）。
           </template>
 
           <span class="hidden sm:inline text-[#00000055]">愿你的每一句分享，都有人回应。</span>
@@ -146,8 +137,7 @@ const topGroup = computed(() => {
   return o && typeof o === 'object' && typeof o.displayName === 'string' ? o : null
 })
 
-// Keep the same behavior as the chat page: media (including avatars) comes from backend :8000 in dev.
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 const resolveMediaUrl = (value) => {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -156,13 +146,13 @@ const resolveMediaUrl = (value) => {
     try {
       const host = new URL(raw).hostname.toLowerCase()
       if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
-        return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+        return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
       }
     } catch {}
     return raw
   }
-  // Most backend fields are like "/api/...", so just prefix.
-  return `${mediaBase}${raw.startsWith('/') ? '' : '/'}${raw}`
+  if (/^\/api\//i.test(raw)) return `${apiBase}${raw.slice(4)}`
+  return raw.startsWith('/') ? raw : `/${raw}`
 }
 
 const topContactAvatarUrl = computed(() => {

@@ -30,7 +30,7 @@
             <template v-if="item.winner">
               <div class="flex items-start gap-1.5 pt-0.5 px-0.5">
                 <!-- 头像 -->
-                <div class="polaroid-photo flex-shrink-0">
+                <div class="polaroid-photo flex-shrink-0 wrapped-privacy-avatar">
                   <img
                     v-if="winnerAvatar(item) && avatarOk[item.winner.username] !== false"
                     :src="winnerAvatar(item)"
@@ -46,7 +46,7 @@
                 <div class="flex-1 min-w-0 pt-0.5 flex flex-col justify-between" style="height:70px">
                   <div>
                     <div class="flex items-center justify-between gap-1 min-w-0">
-                      <div class="wrapped-body text-[10px] text-[#000000cc] truncate flex-1 leading-tight" :title="item.winner.displayName">
+                      <div class="wrapped-body text-[10px] text-[#000000cc] truncate flex-1 leading-tight wrapped-privacy-name" :title="item.winner.displayName">
                         {{ item.winner.displayName }}
                       </div>
                       <!-- 月份徽章 -->
@@ -166,7 +166,7 @@ const formatScore = (n) => {
 }
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n || 0) * 100)))
 
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 const resolveMediaUrl = (value) => {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -174,12 +174,13 @@ const resolveMediaUrl = (value) => {
     try {
       const host = new URL(raw).hostname.toLowerCase()
       if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
-        return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+        return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
       }
     } catch {}
     return raw
   }
-  return `${mediaBase}${raw.startsWith('/') ? '' : '/'}${raw}`
+  if (/^\/api\//i.test(raw)) return `${apiBase}${raw.slice(4)}`
+  return raw.startsWith('/') ? raw : `/${raw}`
 }
 
 const avatarFallback = (name) => {

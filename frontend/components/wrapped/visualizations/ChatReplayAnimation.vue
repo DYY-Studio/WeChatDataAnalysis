@@ -3,7 +3,7 @@
     <!-- Top bar -->
     <div class="wrapped-chat-replay__top">
       <div class="wrapped-chat-replay__top-left">
-        <div :class="['wrapped-chat-replay__avatar', { 'privacy-blur': privacyMode }]">
+        <div class="wrapped-chat-replay__avatar wrapped-privacy-avatar">
           <img
             v-if="resolvedAvatarUrl && avatarOk"
             :src="resolvedAvatarUrl"
@@ -17,7 +17,7 @@
 
         <div class="min-w-0">
           <div class="wrapped-label text-[10px] text-[#00000066]">{{ label }}</div>
-          <div class="wrapped-body text-sm text-[#000000e6] truncate" :title="displayName">
+          <div class="wrapped-body text-sm text-[#000000e6] truncate wrapped-privacy-name" :title="displayName">
             {{ displayNameShown }}
           </div>
         </div>
@@ -42,7 +42,7 @@
 
         <transition name="wrapped-chat-replay-slide">
           <div v-if="showBubble" class="wrapped-chat-replay__bubble">
-            <div :class="['wrapped-chat-replay__bubble-text', { 'privacy-blur': privacyMode }]" :title="content">
+            <div class="wrapped-chat-replay__bubble-text wrapped-privacy-message" :title="content">
               {{ typedText }}
             </div>
           </div>
@@ -78,8 +78,7 @@ const onAvatarError = () => { avatarOk.value = false }
 
 const displayNameShown = computed(() => String(props.displayName || props.maskedName || '').trim())
 
-// Keep the same behavior as the chat page: media (including avatars) comes from backend :8000 in dev.
-const mediaBase = process.client ? 'http://localhost:8000' : ''
+const apiBase = useApiBase()
 const resolveMediaUrl = (value) => {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -88,13 +87,13 @@ const resolveMediaUrl = (value) => {
     try {
       const host = new URL(raw).hostname.toLowerCase()
       if (host.endsWith('.qpic.cn') || host.endsWith('.qlogo.cn')) {
-        return `${mediaBase}/api/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
+        return `${apiBase}/chat/media/proxy_image?url=${encodeURIComponent(raw)}`
       }
     } catch {}
     return raw
   }
-  // Most backend fields are like "/api/...", so just prefix.
-  return `${mediaBase}${raw.startsWith('/') ? '' : '/'}${raw}`
+  if (/^\/api\//i.test(raw)) return `${apiBase}${raw.slice(4)}`
+  return raw.startsWith('/') ? raw : `/${raw}`
 }
 
 const resolvedAvatarUrl = computed(() => resolveMediaUrl(props.avatarUrl))

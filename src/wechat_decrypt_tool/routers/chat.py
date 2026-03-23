@@ -3,6 +3,7 @@ import re
 import sqlite3
 import asyncio
 import json
+import shutil
 import time
 import threading
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ from ..chat_helpers import (
     _build_fts_query,
     _decode_message_content,
     _decode_sqlite_text,
+    _extract_chatroom_top_message_metadata,
     _extract_md5_from_packed_info,
     _extract_sender_from_group_xml,
     _extract_xml_attr,
@@ -50,6 +52,7 @@ from ..chat_helpers import (
     _lookup_resource_md5,
     _normalize_xml_url,
     _parse_app_message,
+    _parse_location_message,
     _parse_system_message_content,
     _parse_pat_message,
     _pick_display_name,
@@ -66,6 +69,8 @@ from ..chat_helpers import (
 )
 from ..media_helpers import _resolve_account_db_storage_dir, _try_find_decrypted_resource
 from .. import chat_edit_store
+from ..app_paths import get_output_dir
+from ..key_store import remove_account_keys_from_store
 from ..path_fix import PathFixRoute
 from ..session_last_message import (
     build_session_last_message_table,
@@ -179,6 +184,178 @@ def _sql_literal(value: Any) -> str:
         return "X'" + b.hex() + "'"
     s = str(value)
     return "'" + s.replace("'", "''") + "'"
+
+
+def _pick_case_insensitive_value(item: Any, *keys: str) -> Any:
+    if not isinstance(item, dict):
+        return None
+    for key in keys:
+        if key in item and item[key] is not None:
+            return item[key]
+        key_lc = str(key or "").strip().lower()
+        for actual_key, actual_value in item.items():
+            if str(actual_key or "").strip().lower() == key_lc and actual_value is not None:
+                return actual_value
+    return None
+
+
+def _table_exists_case_insensitive(conn: sqlite3.Connection, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1",
+            (str(table_name or "").strip(),),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _ensure_output_name2id_table(conn: sqlite3.Connection) -> bool:
+    if _table_exists_case_insensitive(conn, "Name2Id"):
+        return True
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Name2Id (
+                user_name TEXT,
+                is_session INTEGER DEFAULT 1
+            )
+            """
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+
+
+def _best_effort_upsert_output_name2id_rows(
+    conn: sqlite3.Connection,
+    *,
+    account_name: str,
+    rows: list[dict[str, Any]],
+) -> bool:
+    if not rows:
+        return _table_exists_case_insensitive(conn, "Name2Id")
+    if not _ensure_output_name2id_table(conn):
+        return False
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO Name2Id(user_name, is_session) VALUES (?, ?)",
+            (str(account_name or "").strip(), 1),
+        )
+    except Exception:
+        pass
+
+    wrote = False
+    for row in rows:
+        try:
+            rid = int(row.get("real_sender_id") or 0)
+        except Exception:
+            rid = 0
+        username = str(row.get("sender_username") or "").strip()
+        if rid <= 0 or not username:
+            continue
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
+                (rid, username, 1),
+            )
+            wrote = True
+        except Exception:
+            continue
+
+    if wrote:
+        try:
+            conn.commit()
+        except Exception:
+            return False
+    return True
+
+
+def _sync_output_name2id_from_live(
+    conn: sqlite3.Connection,
+    *,
+    rt_conn: Any,
+    msg_db_path_real: Path,
+) -> dict[str, Any]:
+    if not _ensure_output_name2id_table(conn):
+        return {"status": "missing_local_table", "rows": 0}
+
+    local_row = conn.execute("SELECT COUNT(1) AS c, COALESCE(MAX(rowid), 0) AS mx FROM Name2Id").fetchone()
+    try:
+        local_count = int((local_row["c"] if isinstance(local_row, sqlite3.Row) else local_row[0]) or 0)
+    except Exception:
+        local_count = 0
+    try:
+        local_max = int((local_row["mx"] if isinstance(local_row, sqlite3.Row) else local_row[1]) or 0)
+    except Exception:
+        local_max = 0
+
+    sql_stats = "SELECT COUNT(1) AS c, COALESCE(MAX(rowid), 0) AS mx FROM Name2Id"
+    with rt_conn.lock:
+        live_stats_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_stats)
+
+    live_stats = live_stats_rows[0] if live_stats_rows and isinstance(live_stats_rows[0], dict) else {}
+    try:
+        live_count = int(_pick_case_insensitive_value(live_stats, "c", "count") or 0)
+    except Exception:
+        live_count = 0
+    try:
+        live_max = int(_pick_case_insensitive_value(live_stats, "mx", "max_rowid", "max") or 0)
+    except Exception:
+        live_max = 0
+
+    if local_count == live_count and local_max == live_max:
+        return {
+            "status": "up_to_date",
+            "rows": int(local_count),
+            "localCount": int(local_count),
+            "liveCount": int(live_count),
+            "localMax": int(local_max),
+            "liveMax": int(live_max),
+        }
+
+    sql_rows = "SELECT rowid AS rowid, user_name AS user_name, COALESCE(is_session, 1) AS is_session FROM Name2Id ORDER BY rowid ASC"
+    with rt_conn.lock:
+        live_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_rows)
+
+    values: list[tuple[int, str, int]] = []
+    seen_rowids: set[int] = set()
+    for item in live_rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rid = int(_pick_case_insensitive_value(item, "rowid") or 0)
+        except Exception:
+            rid = 0
+        username = str(_pick_case_insensitive_value(item, "user_name", "username") or "").strip()
+        try:
+            is_session = int(_pick_case_insensitive_value(item, "is_session") or 0)
+        except Exception:
+            is_session = 0
+        if rid <= 0 or not username or rid in seen_rowids:
+            continue
+        seen_rowids.add(rid)
+        values.append((rid, username, is_session))
+
+    if live_count > 0 and not values:
+        raise ValueError("Live Name2Id rows could not be decoded.")
+
+    conn.execute("DELETE FROM Name2Id")
+    if values:
+        conn.executemany(
+            "INSERT INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
+            values,
+        )
+    conn.commit()
+    return {
+        "status": "refreshed",
+        "rows": int(len(values)),
+        "localCount": int(local_count),
+        "liveCount": int(live_count),
+        "localMax": int(local_max),
+        "liveMax": int(live_max),
+    }
 
 
 def _normalize_edit_value(col: str, value: Any, *, from_snapshot: bool = False) -> Any:
@@ -508,6 +685,61 @@ def _resolve_sender_display_name(
         if wd and wd != su:
             display_name = wd
     return display_name
+
+
+def _resolve_system_message_display_name(
+    *,
+    sender_username: str,
+    fallback_display_name: str,
+    sender_contact_rows: dict[str, sqlite3.Row],
+    wcdb_display_names: dict[str, str],
+) -> str:
+    su = str(sender_username or "").strip()
+    fallback = str(fallback_display_name or "").strip()
+    if not su:
+        return fallback or "有人"
+
+    row = sender_contact_rows.get(su)
+    display_name = _pick_display_name(row, su)
+    if display_name != su:
+        return display_name
+
+    if fallback and fallback != su:
+        return fallback
+
+    wd = str(wcdb_display_names.get(su) or "").strip()
+    if wd and wd != su:
+        return wd
+
+    return fallback or wd or su
+
+
+def _postprocess_special_message_content(
+    *,
+    message: dict[str, Any],
+    sender_contact_rows: dict[str, sqlite3.Row],
+    wcdb_display_names: dict[str, str],
+) -> None:
+    raw = str(message.get("_rawText") or "")
+    if not raw:
+        message.pop("_rawText", None)
+        return
+
+    local_type = int(message.get("type") or 0)
+    if local_type == 266287972401:
+        message["content"] = _parse_pat_message(raw, sender_contact_rows)
+    elif local_type == 10000:
+        message["content"] = _parse_system_message_content(
+            raw,
+            resolve_display_name=lambda sender_username, fallback_display_name="": _resolve_system_message_display_name(
+                sender_username=sender_username,
+                fallback_display_name=fallback_display_name,
+                sender_contact_rows=sender_contact_rows,
+                wcdb_display_names=wcdb_display_names,
+            ),
+        )
+
+    message.pop("_rawText", None)
 
 
 def _realtime_sync_lock(account: str, username: str) -> threading.Lock:
@@ -1211,6 +1443,7 @@ def sync_chat_realtime_messages(
         # Some sessions may not exist in the decrypted snapshot yet; create the missing Msg_<md5> table
         # so we can insert the realtime rows and make `/api/chat/messages` work after switching off realtime.
         msg_db_path, table_name = _ensure_decrypted_message_table(account_dir, username)
+        msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, msg_db_path.stem)
         logger.info(
             "[%s] resolved decrypted table account=%s username=%s db=%s table=%s",
             trace_id,
@@ -1223,6 +1456,34 @@ def sync_chat_realtime_messages(
         msg_conn = sqlite3.connect(str(msg_db_path))
         msg_conn.row_factory = sqlite3.Row
         try:
+            name2id_synced = False
+            try:
+                sync_t0 = time.perf_counter()
+                name2id_result = _sync_output_name2id_from_live(
+                    msg_conn,
+                    rt_conn=rt_conn,
+                    msg_db_path_real=msg_db_path_real,
+                )
+                sync_ms = (time.perf_counter() - sync_t0) * 1000.0
+                name2id_synced = str(name2id_result.get("status") or "") in {"up_to_date", "refreshed"}
+                logger.info(
+                    "[%s] Name2Id sync account=%s db=%s status=%s rows=%s ms=%.1f",
+                    trace_id,
+                    account_dir.name,
+                    msg_db_path.stem,
+                    str(name2id_result.get("status") or ""),
+                    int(name2id_result.get("rows") or 0),
+                    sync_ms,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%s] Name2Id sync failed account=%s db=%s error=%s",
+                    trace_id,
+                    account_dir.name,
+                    msg_db_path.stem,
+                    str(e),
+                )
+
             quoted_table = _quote_ident(table_name)
             row = msg_conn.execute(f"SELECT MAX(local_id) AS mx FROM {quoted_table}").fetchone()
             try:
@@ -1365,42 +1626,12 @@ def sync_chat_realtime_messages(
 
             inserted = 0
             backfilled = 0
-            if new_rows:
-                # Best-effort: keep Name2Id updated so decrypted queries can resolve sender usernames.
-                # Rowid mapping is important (message.real_sender_id joins Name2Id.rowid).
-                try:
-                    has_name2id = bool(
-                        msg_conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower('Name2Id') LIMIT 1"
-                        ).fetchone()
-                    )
-                except Exception:
-                    has_name2id = False
-
-                if has_name2id:
-                    try:
-                        msg_conn.execute(
-                            "INSERT OR IGNORE INTO Name2Id(user_name, is_session) VALUES (?, ?)",
-                            (str(account_dir.name), 1),
-                        )
-                    except Exception:
-                        pass
-
-                    for r in new_rows:
-                        try:
-                            rid = int(r.get("real_sender_id") or 0)
-                        except Exception:
-                            rid = 0
-                        su = str(r.get("sender_username") or "").strip()
-                        if rid <= 0 or not su:
-                            continue
-                        try:
-                            msg_conn.execute(
-                                "INSERT OR IGNORE INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
-                                (rid, su, 1),
-                            )
-                        except Exception:
-                            continue
+            if new_rows and (not name2id_synced):
+                _best_effort_upsert_output_name2id_rows(
+                    msg_conn,
+                    account_name=account_dir.name,
+                    rows=new_rows,
+                )
 
                 # Insert older -> newer to keep sqlite btree locality similar to existing data.
                 values = [tuple(r.get(c) for c in insert_cols) for r in reversed(new_rows)]
@@ -1598,6 +1829,30 @@ def _sync_chat_realtime_messages_for_table(
     msg_conn = sqlite3.connect(str(msg_db_path))
     msg_conn.row_factory = sqlite3.Row
     try:
+        msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, msg_db_path.stem)
+        name2id_synced = False
+        try:
+            name2id_result = _sync_output_name2id_from_live(
+                msg_conn,
+                rt_conn=rt_conn,
+                msg_db_path_real=msg_db_path_real,
+            )
+            name2id_synced = str(name2id_result.get("status") or "") in {"up_to_date", "refreshed"}
+            logger.info(
+                "[realtime] Name2Id sync account=%s db=%s status=%s rows=%s",
+                account_dir.name,
+                msg_db_path.stem,
+                str(name2id_result.get("status") or ""),
+                int(name2id_result.get("rows") or 0),
+            )
+        except Exception as e:
+            logger.warning(
+                "[realtime] Name2Id sync failed account=%s db=%s error=%s",
+                account_dir.name,
+                msg_db_path.stem,
+                str(e),
+            )
+
         quoted_table = _quote_ident(table_name)
         row = msg_conn.execute(f"SELECT MAX(local_id) AS mx FROM {quoted_table}").fetchone()
         try:
@@ -1736,40 +1991,12 @@ def _sync_chat_realtime_messages_for_table(
 
         inserted = 0
         backfilled = 0
-        if new_rows:
-            try:
-                has_name2id = bool(
-                    msg_conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower('Name2Id') LIMIT 1"
-                    ).fetchone()
-                )
-            except Exception:
-                has_name2id = False
-
-            if has_name2id:
-                try:
-                    msg_conn.execute(
-                        "INSERT OR IGNORE INTO Name2Id(user_name, is_session) VALUES (?, ?)",
-                        (str(account_dir.name), 1),
-                    )
-                except Exception:
-                    pass
-
-                for r in new_rows:
-                    try:
-                        rid = int(r.get("real_sender_id") or 0)
-                    except Exception:
-                        rid = 0
-                    su = str(r.get("sender_username") or "").strip()
-                    if rid <= 0 or not su:
-                        continue
-                    try:
-                        msg_conn.execute(
-                            "INSERT OR IGNORE INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
-                            (rid, su, 1),
-                        )
-                    except Exception:
-                        continue
+        if new_rows and (not name2id_synced):
+            _best_effort_upsert_output_name2id_rows(
+                msg_conn,
+                account_name=account_dir.name,
+                rows=new_rows,
+            )
 
             values = [tuple(r.get(c) for c in insert_cols) for r in reversed(new_rows)]
             insert_t0 = time.perf_counter()
@@ -2673,6 +2900,10 @@ def _append_full_messages_from_rows(
         file_md5 = ""
         transfer_id = ""
         voip_type = ""
+        location_lat: Optional[float] = None
+        location_lng: Optional[float] = None
+        location_poiname = ""
+        location_label = ""
 
         if local_type == 10000:
             render_type = "system"
@@ -2883,6 +3114,14 @@ def _append_full_messages_from_rows(
                     create_time=create_time,
                 )
             content_text = "[表情]"
+        elif local_type == 48:
+            parsed = _parse_location_message(raw_text)
+            render_type = str(parsed.get("renderType") or "location")
+            content_text = str(parsed.get("content") or "[Location]")
+            location_lat = parsed.get("locationLat")
+            location_lng = parsed.get("locationLng")
+            location_poiname = str(parsed.get("locationPoiname") or "")
+            location_label = str(parsed.get("locationLabel") or "")
         elif local_type == 50:
             render_type = "voip"
             try:
@@ -2929,10 +3168,15 @@ def _append_full_messages_from_rows(
                             cover_url = str(parsed.get("coverUrl") or cover_url)
                             thumb_url = str(parsed.get("thumbUrl") or thumb_url)
                             from_name = str(parsed.get("from") or from_name)
+                            from_username = str(parsed.get("fromUsername") or from_username)
                             file_size = str(parsed.get("size") or file_size)
                             pay_sub_type = str(parsed.get("paySubType") or pay_sub_type)
                             file_md5 = str(parsed.get("fileMd5") or file_md5)
                             transfer_id = str(parsed.get("transferId") or transfer_id)
+                            quote_username = str(parsed.get("quoteUsername") or quote_username)
+                            quote_server_id = str(parsed.get("quoteServerId") or quote_server_id)
+                            quote_type = str(parsed.get("quoteType") or quote_type)
+                            quote_voice_length = str(parsed.get("quoteVoiceLength") or quote_voice_length)
 
                             if render_type == "transfer":
                                 # 如果 transferId 仍为空，尝试从原始 XML 提取
@@ -3009,7 +3253,11 @@ def _append_full_messages_from_rows(
                 "paySubType": pay_sub_type,
                 "transferStatus": transfer_status,
                 "transferId": transfer_id,
-                "_rawText": raw_text if local_type == 266287972401 else "",
+                "locationLat": location_lat,
+                "locationLng": location_lng,
+                "locationPoiname": location_poiname,
+                "locationLabel": location_label,
+                "_rawText": raw_text if local_type in (10000, 266287972401) else "",
             }
         )
 
@@ -3246,9 +3494,20 @@ def _postprocess_full_messages(
                 if fn and fn in name_to_username:
                     m["fromUsername"] = name_to_username[fn]
 
+    system_usernames: set[str] = set()
+    for m in merged:
+        if int(m.get("type") or 0) != 10000:
+            continue
+        meta = _extract_chatroom_top_message_metadata(str(m.get("_rawText") or ""))
+        operator_username = str(meta.get("operatorUsername") or "").strip()
+        if operator_username:
+            system_usernames.add(operator_username)
+
     from_usernames = [str(m.get("fromUsername") or "").strip() for m in merged]
     uniq_senders = list(
-        dict.fromkeys([u for u in (sender_usernames + list(pat_usernames) + quote_usernames + from_usernames) if u])
+        dict.fromkeys(
+            [u for u in (sender_usernames + list(pat_usernames) + quote_usernames + from_usernames + list(system_usernames)) if u]
+        )
     )
     sender_contact_rows = _load_contact_rows(contact_db_path, uniq_senders)
     local_sender_avatars = _query_head_image_usernames(head_image_db_path, uniq_senders)
@@ -3302,20 +3561,19 @@ def _postprocess_full_messages(
                     m["from"] = wd
 
         su = str(m.get("senderUsername") or "")
-        if not su:
-            continue
-        m["senderDisplayName"] = _resolve_sender_display_name(
-            sender_username=su,
-            sender_contact_rows=sender_contact_rows,
-            wcdb_display_names=wcdb_display_names,
-            group_nicknames=group_nicknames,
-        )
-        avatar_url = base_url + _avatar_url_unified(
-            account_dir=account_dir,
-            username=su,
-            local_avatar_usernames=local_sender_avatars,
-        )
-        m["senderAvatar"] = avatar_url
+        if su:
+            m["senderDisplayName"] = _resolve_sender_display_name(
+                sender_username=su,
+                sender_contact_rows=sender_contact_rows,
+                wcdb_display_names=wcdb_display_names,
+                group_nicknames=group_nicknames,
+            )
+            avatar_url = base_url + _avatar_url_unified(
+                account_dir=account_dir,
+                username=su,
+                local_avatar_usernames=local_sender_avatars,
+            )
+            m["senderAvatar"] = avatar_url
 
         qu = str(m.get("quoteUsername") or "").strip()
         if qu:
@@ -3446,13 +3704,11 @@ def _postprocess_full_messages(
         except Exception:
             pass
 
-        if int(m.get("type") or 0) == 266287972401:
-            raw = str(m.get("_rawText") or "")
-            if raw:
-                m["content"] = _parse_pat_message(raw, sender_contact_rows)
-
-        if "_rawText" in m:
-            m.pop("_rawText", None)
+        _postprocess_special_message_content(
+            message=m,
+            sender_contact_rows=sender_contact_rows,
+            wcdb_display_names=wcdb_display_names,
+        )
 
 
 @router.get("/api/chat/accounts", summary="列出已解密账号")
@@ -3471,6 +3727,85 @@ async def list_chat_accounts():
         "status": "success",
         "accounts": accounts,
         "default_account": accounts[0],
+    }
+
+
+@router.get("/api/chat/account_info", summary="获取当前账号信息")
+def get_chat_account_info(account: Optional[str] = None):
+    account_dir = _resolve_account_dir(account)
+    db_files = sorted([p.name for p in account_dir.glob("*.db") if p.is_file()])
+
+    session_db = account_dir / "session.db"
+    session_updated_at = 0
+    try:
+        session_updated_at = int(session_db.stat().st_mtime)
+    except Exception:
+        session_updated_at = 0
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "path": str(account_dir),
+        "database_count": len(db_files),
+        "databases": db_files,
+        "session_updated_at": session_updated_at,
+    }
+
+
+@router.delete("/api/chat/account", summary="删除当前账号在本项目中的数据")
+def delete_chat_account(account: str):
+    account_name = str(account or "").strip()
+    if not account_name:
+        raise HTTPException(status_code=400, detail="Missing account.")
+
+    account_dir = _resolve_account_dir(account_name)
+
+    # Best-effort: close realtime connections first, otherwise Windows may keep db files locked.
+    try:
+        WCDB_REALTIME.disconnect(account_name)
+    except Exception:
+        pass
+
+    with _REALTIME_SYNC_MU:
+        _REALTIME_SYNC_ALL_LOCKS.pop(account_name, None)
+        stale_lock_keys = [k for k in _REALTIME_SYNC_LOCKS.keys() if k and k[0] == account_name]
+        for k in stale_lock_keys:
+            _REALTIME_SYNC_LOCKS.pop(k, None)
+
+    removed_edit_count = 0
+    try:
+        removed_edit_count = int(chat_edit_store.delete_account_edits(account_name) or 0)
+    except Exception:
+        removed_edit_count = 0
+
+    removed_key_cache = False
+    try:
+        removed_key_cache = bool(remove_account_keys_from_store(account_name))
+    except Exception:
+        removed_key_cache = False
+
+    output_dir = get_output_dir()
+    exports_dir = output_dir / "exports" / account_name
+    if exports_dir.exists():
+        try:
+            shutil.rmtree(exports_dir)
+        except Exception:
+            # Ignore export cleanup failure; account dir removal is the core operation.
+            pass
+
+    try:
+        shutil.rmtree(account_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除账号数据失败：{e}")
+
+    accounts = _list_decrypted_accounts()
+    return {
+        "status": "success",
+        "deleted_account": account_name,
+        "accounts": accounts,
+        "default_account": accounts[0] if accounts else None,
+        "removed_edit_count": removed_edit_count,
+        "removed_key_cache": removed_key_cache,
     }
 
 
@@ -3734,8 +4069,19 @@ def list_chat_sessions(
         except Exception:
             last_previews = {}
 
+    def _is_generic_location_preview(value: Any) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "").strip()).strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        return lowered in {"[location]", "[位置]"} or lowered.endswith(": [location]") or lowered.endswith(": [位置]")
+
     if preview_mode in {"latest", "db"}:
-        targets = usernames if preview_mode == "db" else [u for u in usernames if u and (u not in last_previews)]
+        targets = (
+            usernames
+            if preview_mode == "db"
+            else [u for u in usernames if u and ((u not in last_previews) or _is_generic_location_preview(last_previews.get(u)))]
+        )
         if targets:
             legacy = _load_latest_message_previews(account_dir, targets)
             for u, v in legacy.items():
@@ -3830,6 +4176,11 @@ def list_chat_sessions(
                 last_msg_sub_type = 0
             if last_msg_type == 81604378673 or (last_msg_type == 49 and last_msg_sub_type == 19):
                 last_message = "[聊天记录]"
+            elif last_msg_type == 48:
+                text = re.sub(r"\s+", " ", str(last_message or "").strip()).strip()
+                text = re.sub(r"^\[location\]", "", text, flags=re.IGNORECASE).strip()
+                text = re.sub(r"^\[位置\]", "", text).strip()
+                last_message = f"[位置]{text}" if text else "[位置]"
 
         last_message = _normalize_session_preview_text(
             last_message,
@@ -4065,6 +4416,10 @@ def _collect_chat_messages(
                 file_md5 = ""
                 transfer_id = ""
                 voip_type = ""
+                location_lat: Optional[float] = None
+                location_lng: Optional[float] = None
+                location_poiname = ""
+                location_label = ""
 
                 if local_type == 10000:
                     render_type = "system"
@@ -4114,8 +4469,7 @@ def _collect_chat_messages(
                     render_type = "system"
                     template = _extract_xml_tag_text(raw_text, "template")
                     if template:
-                        import re
-
+                        # import re
                         pat_usernames.update({m.group(1) for m in re.finditer(r"\$\{([^}]+)\}", template) if m.group(1)})
                         content_text = "[拍一拍]"
                     else:
@@ -4252,11 +4606,18 @@ def _collect_chat_messages(
                             create_time=create_time,
                         )
                     content_text = "[表情]"
+                elif local_type == 48:
+                    parsed = _parse_location_message(raw_text)
+                    render_type = str(parsed.get("renderType") or "location")
+                    content_text = str(parsed.get("content") or "[Location]")
+                    location_lat = parsed.get("locationLat")
+                    location_lng = parsed.get("locationLng")
+                    location_poiname = str(parsed.get("locationPoiname") or "")
+                    location_label = str(parsed.get("locationLabel") or "")
                 elif local_type == 50:
                     render_type = "voip"
                     try:
-                        import re
-
+                        # import re
                         block = raw_text
                         m_voip = re.search(
                             r"(<VoIPBubbleMsg[^>]*>.*?</VoIPBubbleMsg>)",
@@ -4291,6 +4652,7 @@ def _collect_chat_messages(
                                     title = str(parsed.get("title") or title)
                                     url = str(parsed.get("url") or url)
                                     from_name = str(parsed.get("from") or from_name)
+                                    from_username = str(parsed.get("fromUsername") or from_username)
                                     record_item = str(parsed.get("recordItem") or record_item)
                                     quote_title = str(parsed.get("quoteTitle") or quote_title)
                                     quote_content = str(parsed.get("quoteContent") or quote_content)
@@ -4304,6 +4666,10 @@ def _collect_chat_messages(
                                     pay_sub_type = str(parsed.get("paySubType") or pay_sub_type)
                                     file_md5 = str(parsed.get("fileMd5") or file_md5)
                                     transfer_id = str(parsed.get("transferId") or transfer_id)
+                                    quote_username = str(parsed.get("quoteUsername") or quote_username)
+                                    quote_server_id = str(parsed.get("quoteServerId") or quote_server_id)
+                                    quote_type = str(parsed.get("quoteType") or quote_type)
+                                    quote_voice_length = str(parsed.get("quoteVoiceLength") or quote_voice_length)
 
                                     if render_type == "transfer":
                                         # 如果 transferId 仍为空，尝试从原始 XML 提取
@@ -4387,7 +4753,11 @@ def _collect_chat_messages(
                         "paySubType": pay_sub_type,
                         "transferStatus": transfer_status,
                         "transferId": transfer_id,
-                        "_rawText": raw_text if local_type == 266287972401 else "",
+                        "locationLat": location_lat,
+                        "locationLng": location_lng,
+                        "locationPoiname": location_poiname,
+                        "locationLabel": location_label,
+                        "_rawText": raw_text if local_type in (10000, 266287972401) else "",
                     }
                 )
         finally:
@@ -5013,7 +5383,7 @@ def list_chat_messages(
                     render_type = "system"
                     template = _extract_xml_tag_text(raw_text, "template")
                     if template:
-                        import re
+                        # import re
 
                         pat_usernames.update({m.group(1) for m in re.finditer(r"\$\{([^}]+)\}", template) if m.group(1)})
                         content_text = "[拍一拍]"
@@ -5145,7 +5515,7 @@ def list_chat_messages(
                 elif local_type == 50:
                     render_type = "voip"
                     try:
-                        import re
+                        # import re
 
                         block = raw_text
                         m_voip = re.search(
@@ -5270,7 +5640,7 @@ def list_chat_messages(
                         "paySubType": pay_sub_type,
                         "transferStatus": transfer_status,
                         "transferId": transfer_id,
-                        "_rawText": raw_text if local_type == 266287972401 else "",
+                        "_rawText": raw_text if local_type in (10000, 266287972401) else "",
                     }
                 )
         finally:
@@ -5359,6 +5729,15 @@ def list_chat_messages(
             continue
         pat_usernames_in_page.update({mm.group(1) for mm in re.finditer(r"\$\{([^}]+)\}", template) if mm.group(1)})
 
+    system_usernames_in_page: set[str] = set()
+    for m in messages_window:
+        if int(m.get("type") or 0) != 10000:
+            continue
+        meta = _extract_chatroom_top_message_metadata(str(m.get("_rawText") or ""))
+        operator_username = str(meta.get("operatorUsername") or "").strip()
+        if operator_username:
+            system_usernames_in_page.add(operator_username)
+
     from_usernames = [str(m.get("fromUsername") or "").strip() for m in messages_window]
     sender_usernames_in_page = [str(m.get("senderUsername") or "").strip() for m in messages_window]
     quote_usernames_in_page = [str(m.get("quoteUsername") or "").strip() for m in messages_window]
@@ -5371,6 +5750,7 @@ def list_chat_messages(
                     + list(pat_usernames_in_page)
                     + quote_usernames_in_page
                     + from_usernames
+                    + list(system_usernames_in_page)
                 )
                 if u
             ]
@@ -5428,20 +5808,19 @@ def list_chat_messages(
                     m["from"] = wd
 
         su = str(m.get("senderUsername") or "")
-        if not su:
-            continue
-        m["senderDisplayName"] = _resolve_sender_display_name(
-            sender_username=su,
-            sender_contact_rows=sender_contact_rows,
-            wcdb_display_names=wcdb_display_names,
-            group_nicknames=group_nicknames,
-        )
-        avatar_url = base_url + _avatar_url_unified(
-            account_dir=account_dir,
-            username=su,
-            local_avatar_usernames=local_sender_avatars,
-        )
-        m["senderAvatar"] = avatar_url
+        if su:
+            m["senderDisplayName"] = _resolve_sender_display_name(
+                sender_username=su,
+                sender_contact_rows=sender_contact_rows,
+                wcdb_display_names=wcdb_display_names,
+                group_nicknames=group_nicknames,
+            )
+            avatar_url = base_url + _avatar_url_unified(
+                account_dir=account_dir,
+                username=su,
+                local_avatar_usernames=local_sender_avatars,
+            )
+            m["senderAvatar"] = avatar_url
 
         qu = str(m.get("quoteUsername") or "").strip()
         if qu:
@@ -5494,6 +5873,7 @@ def list_chat_messages(
 
                     if existing_local:
                         try:
+                            # import re
                             cur = str(m.get("emojiUrl") or "")
                             if cur and re.match(r"^https?://", cur, flags=re.I) and ("/api/chat/media/emoji" not in cur):
                                 m["emojiRemoteUrl"] = cur
@@ -5566,13 +5946,11 @@ def list_chat_messages(
         except Exception:
             pass
 
-        if int(m.get("type") or 0) == 266287972401:
-            raw = str(m.get("_rawText") or "")
-            if raw:
-                m["content"] = _parse_pat_message(raw, sender_contact_rows)
-
-        if "_rawText" in m:
-            m.pop("_rawText", None)
+        _postprocess_special_message_content(
+            message=m,
+            sender_contact_rows=sender_contact_rows,
+            wcdb_display_names=wcdb_display_names,
+        )
 
     return {
         "status": "success",
@@ -5892,7 +6270,14 @@ async def _search_chat_messages_via_fts(
     scope = "conversation" if username else "global"
 
     if username:
-        uniq_usernames = list(dict.fromkeys([username] + [str(x.get("senderUsername") or "") for x in hits]))
+        system_usernames = [
+            str(_extract_chatroom_top_message_metadata(str(x.get("_rawText") or "")).get("operatorUsername") or "").strip()
+            for x in hits
+            if int(x.get("type") or 0) == 10000
+        ]
+        uniq_usernames = list(
+            dict.fromkeys([username] + [str(x.get("senderUsername") or "") for x in hits] + system_usernames)
+        )
         contact_rows = _load_contact_rows(contact_db_path, uniq_usernames)
         local_avatar_usernames = _query_head_image_usernames(head_image_db_path, uniq_usernames)
 
@@ -5959,10 +6344,22 @@ async def _search_chat_messages_via_fts(
                     local_avatar_usernames=local_avatar_usernames,
                 )
                 h["senderAvatar"] = avatar_url
+            _postprocess_special_message_content(
+                message=h,
+                sender_contact_rows=contact_rows,
+                wcdb_display_names=wcdb_display_names,
+            )
     else:
+        system_usernames = [
+            str(_extract_chatroom_top_message_metadata(str(x.get("_rawText") or "")).get("operatorUsername") or "").strip()
+            for x in hits
+            if int(x.get("type") or 0) == 10000
+        ]
         uniq_contacts = list(
             dict.fromkeys(
-                [str(x.get("username") or "") for x in hits] + [str(x.get("senderUsername") or "") for x in hits]
+                [str(x.get("username") or "") for x in hits]
+                + [str(x.get("senderUsername") or "") for x in hits]
+                + system_usernames
             )
         )
         contact_rows = _load_contact_rows(contact_db_path, uniq_contacts)
@@ -6042,6 +6439,11 @@ async def _search_chat_messages_via_fts(
                     local_avatar_usernames=local_avatar_usernames,
                 )
                 h["senderAvatar"] = avatar_url
+            _postprocess_special_message_content(
+                message=h,
+                sender_contact_rows=contact_rows,
+                wcdb_display_names=wcdb_display_names,
+            )
 
     return {
         "status": "success",
@@ -6294,7 +6696,14 @@ async def search_chat_messages(
         total_in_scan = len(conv_hits)
         page = conv_hits[int(offset) : int(offset) + int(limit)]
 
-        uniq_usernames = list(dict.fromkeys([username] + [str(x.get("senderUsername") or "") for x in page]))
+        system_usernames = [
+            str(_extract_chatroom_top_message_metadata(str(x.get("_rawText") or "")).get("operatorUsername") or "").strip()
+            for x in page
+            if int(x.get("type") or 0) == 10000
+        ]
+        uniq_usernames = list(
+            dict.fromkeys([username] + [str(x.get("senderUsername") or "") for x in page] + system_usernames)
+        )
         contact_rows = _load_contact_rows(contact_db_path, uniq_usernames)
         conv_row = contact_rows.get(username)
         conv_name = _pick_display_name(conv_row, username)
@@ -6315,6 +6724,11 @@ async def search_chat_messages(
                     wcdb_display_names={},
                     group_nicknames=group_nicknames,
                 )
+            _postprocess_special_message_content(
+                message=h,
+                sender_contact_rows=contact_rows,
+                wcdb_display_names={},
+            )
 
         return {
             "status": "success",
@@ -6391,7 +6805,13 @@ async def search_chat_messages(
 
     uniq_contacts = list(
         dict.fromkeys(
-            [str(x.get("username") or "") for x in page] + [str(x.get("senderUsername") or "") for x in page]
+            [str(x.get("username") or "") for x in page]
+            + [str(x.get("senderUsername") or "") for x in page]
+            + [
+                str(_extract_chatroom_top_message_metadata(str(x.get("_rawText") or "")).get("operatorUsername") or "").strip()
+                for x in page
+                if int(x.get("type") or 0) == 10000
+            ]
         )
     )
     contact_rows = _load_contact_rows(contact_db_path, uniq_contacts)
@@ -6426,6 +6846,11 @@ async def search_chat_messages(
                 wcdb_display_names={},
                 group_nicknames=group_nickname_cache.get(cu, {}),
             )
+        _postprocess_special_message_content(
+            message=h,
+            sender_contact_rows=contact_rows,
+            wcdb_display_names={},
+        )
 
     return {
         "status": "success",

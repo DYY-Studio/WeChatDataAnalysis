@@ -1,22 +1,28 @@
+import { reportServerError } from '~/lib/server-error-logging'
+
 // API请求组合式函数
 export const useApi = () => {
-  const config = useRuntimeConfig()
+  const baseURL = useApiBase()
   
   // 基础请求函数
   const request = async (url, options = {}) => {
     try {
-      // Default to same-origin `/api` so Nuxt devProxy / backend-mounted UI both work.
-      // Override via `NUXT_PUBLIC_API_BASE`, e.g. `http://127.0.0.1:8000/api`.
-      const apiBase = String(config?.public?.apiBase || '').trim()
-      const baseURL = (apiBase ? apiBase : '/api').replace(/\/$/, '')
-      
       const response = await $fetch(url, {
         baseURL,
         ...options,
-        onResponseError({ response }) {
+        async onResponseError({ response }) {
           if (response.status === 400) {
             throw new Error(response._data?.detail || '请求参数错误')
-          } else if (response.status === 500) {
+          } else if (response.status >= 500) {
+            await reportServerError({
+              status: response.status,
+              method: options?.method || 'GET',
+              requestUrl: url,
+              message: '服务器错误，请稍后重试',
+              backendDetail: response._data?.detail || '',
+              source: 'useApi',
+              apiBase: baseURL,
+            })
             throw new Error('服务器错误，请稍后重试')
           }
         }
@@ -63,6 +69,22 @@ export const useApi = () => {
 
   const listChatAccounts = async () => {
     return await request('/chat/accounts')
+  }
+
+  const getChatAccountInfo = async (params = {}) => {
+    const query = new URLSearchParams()
+    if (params && params.account) query.set('account', params.account)
+    const url = '/chat/account_info' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url)
+  }
+
+  const deleteChatAccount = async (params = {}) => {
+    const account = String(params?.account || '').trim()
+    if (!account) throw new Error('Missing account')
+    const query = new URLSearchParams()
+    query.set('account', account)
+    const url = '/chat/account' + (query.toString() ? `?${query.toString()}` : '')
+    return await request(url, { method: 'DELETE' })
   }
 
   const listChatSessions = async (params = {}) => {
@@ -530,8 +552,8 @@ export const useApi = () => {
   }
 
   // 获取数据库密钥
-  const getDbKey = async () => {
-    return await request('/get_db_key')
+  const getKeys = async () => {
+    return await request('/get_keys')
   }
 
   // 获取图片密钥
@@ -545,6 +567,8 @@ export const useApi = () => {
     decryptDatabase,
     healthCheck,
     listChatAccounts,
+    getChatAccountInfo,
+    deleteChatAccount,
     listChatSessions,
     listChatMessages,
     getChatMessageRaw,
@@ -589,7 +613,7 @@ export const useApi = () => {
     getWrappedAnnual,
     getWrappedAnnualMeta,
     getWrappedAnnualCard,
-    getDbKey,
+    getKeys,
     getImageKey,
     getWxStatus,
   }
