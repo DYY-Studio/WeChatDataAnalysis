@@ -5,7 +5,7 @@ const SESSION_LIST_WIDTH_KEY = 'ui.chat.session_list_width_physical'
 const SESSION_LIST_WIDTH_KEY_LEGACY = 'ui.chat.session_list_width'
 const SESSION_LIST_WIDTH_DEFAULT = 295
 const SESSION_LIST_WIDTH_MIN = 220
-const SESSION_LIST_WIDTH_MAX = 520
+const SESSION_LIST_WIDTH_MAX = 600
 
 export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled, api }) => {
   const showSearchAccountSwitcher = false

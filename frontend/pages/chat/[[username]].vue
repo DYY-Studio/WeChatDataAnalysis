@@ -58,75 +58,30 @@ const routeUsername = computed(() => {
   return (Array.isArray(raw) ? raw[0] : raw) || ''
 })
 
-const buildChatPath = (username) => {
-  return username ? `/chat/${encodeURIComponent(username)}` : '/chat'
+const isDesktopShell = () => {
+  if (!process.client || typeof window === 'undefined') return false
+  return !!window.wechatDesktop?.__brand
 }
 
-// 响应式数据
-const selectedContact = ref(null)
-const contactProfileCardOpen = ref(false)
-const contactProfileCardMessageId = ref('')
-const contactProfileLoading = ref(false)
-const contactProfileError = ref('')
-const contactProfileData = ref(null)
-let contactProfileHoverHideTimer = null
+const desktopDebugEnabled = ref(false)
+const chatBootstrapStartedAt = process.client && typeof performance !== 'undefined' ? performance.now() : 0
+let messageLoadSequence = 0
+let firstSelectContactLogged = false
+let firstLoadMessagesLogged = false
 
-// 隐私模式
-const privacyStore = usePrivacyStore()
-privacyStore.init()
-const { privacyMode } = storeToRefs(privacyStore)
+const resolveDesktopDebugEnabled = async () => {
+  if (!isDesktopShell() || typeof window.wechatDesktop?.isDebugEnabled !== 'function') {
+    desktopDebugEnabled.value = false
+    return false
+  }
 
-// 会话列表（中间栏）宽度（按物理像素 px 配置）：默认 295px，支持拖动调整并持久化
-const SESSION_LIST_WIDTH_KEY = 'ui.chat.session_list_width_physical'
-const SESSION_LIST_WIDTH_KEY_LEGACY = 'ui.chat.session_list_width'
-const SESSION_LIST_WIDTH_DEFAULT = 295
-const SESSION_LIST_WIDTH_MIN = 220
-const SESSION_LIST_WIDTH_MAX = 600
-
-const sessionListWidth = ref(SESSION_LIST_WIDTH_DEFAULT)
-const sessionListResizing = ref(false)
-
-let sessionListResizeStartX = 0
-let sessionListResizeStartWidth = SESSION_LIST_WIDTH_DEFAULT
-let sessionListResizeStartDpr = 1
-let sessionListResizePrevCursor = ''
-let sessionListResizePrevUserSelect = ''
-
-const clampSessionListWidth = (n) => {
-  const v = Number.isFinite(n) ? n : SESSION_LIST_WIDTH_DEFAULT
-  return Math.min(SESSION_LIST_WIDTH_MAX, Math.max(SESSION_LIST_WIDTH_MIN, Math.round(v)))
-}
-
-const loadSessionListWidth = () => {
-  if (!process.client) return
   try {
-    const raw = localStorage.getItem(SESSION_LIST_WIDTH_KEY)
-    const v = parseInt(String(raw || ''), 10)
-    if (!Number.isNaN(v)) {
-      sessionListWidth.value = clampSessionListWidth(v)
-      return
-    }
+    desktopDebugEnabled.value = !!(await window.wechatDesktop.isDebugEnabled())
+  } catch {
+    desktopDebugEnabled.value = false
+  }
 
-    // Legacy: value was stored as CSS px. Convert to physical px using current dpr.
-    const legacy = localStorage.getItem(SESSION_LIST_WIDTH_KEY_LEGACY)
-    const legacyV = parseInt(String(legacy || ''), 10)
-    if (!Number.isNaN(legacyV)) {
-      const dpr = window.devicePixelRatio || 1
-      const converted = clampSessionListWidth(legacyV * dpr)
-      sessionListWidth.value = converted
-      try {
-        localStorage.setItem(SESSION_LIST_WIDTH_KEY, String(converted))
-        localStorage.removeItem(SESSION_LIST_WIDTH_KEY_LEGACY)
-      } catch {}
-    }
-  } catch {}
-}
-
-const saveSessionListWidth = () => {
-  if (!process.client) return
-  try {
-    localStorage.setItem(SESSION_LIST_WIDTH_KEY, String(clampSessionListWidth(sessionListWidth.value)))
-  } catch {}
+  return desktopDebugEnabled.value
 }
 
 const chatBootstrapElapsedMs = () => {
